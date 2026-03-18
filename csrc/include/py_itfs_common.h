@@ -9,7 +9,7 @@ bool static isGPUArch(const std::vector<std::string> &archs)
 {
     hipDeviceProp_t props;
 
-    hipGetDeviceProperties(&props, 0);
+    HIP_CALL(hipGetDeviceProperties(&props, 0));
 
     std::string device_arch = props.gcnArchName;
     for (std::string arch : archs)
