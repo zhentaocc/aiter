@@ -115,6 +115,78 @@ def test_top_k_top_p_joint_sampling_from_probs(batch_size, vocab_size, p, k):
         ]
 
 
+@pytest.mark.parametrize("batch_size", [1, 4, 16])
+@pytest.mark.parametrize("vocab_size", [128, 1024, 32000])
+@pytest.mark.parametrize("draft_len", [2, 4, 8])
+@pytest.mark.parametrize("threshold_single,threshold_acc", [(1.0, 1.0), (0.5, 0.8)])
+def test_chain_speculative_sampling(
+    batch_size, vocab_size, draft_len, threshold_single, threshold_acc
+):
+    """Test chain speculative sampling against a PyTorch reference."""
+    torch.manual_seed(42)
+    device = torch.device("cuda")
+
+    # Generate random normalized target probabilities
+    raw = torch.rand(batch_size, draft_len, vocab_size, device=device)
+    target_probs = raw / raw.sum(dim=-1, keepdim=True)
+
+    # Random draft candidate token ids
+    candidates = torch.randint(0, vocab_size, (batch_size, draft_len), device=device)
+
+    # Random uniform coins
+    uniform_samples = torch.rand(batch_size, draft_len, device=device)
+    uniform_samples_final = torch.rand(batch_size, device=device)
+
+    # --- PyTorch reference implementation ---
+    ref_accept_len = torch.zeros(batch_size, dtype=torch.int32, device=device)
+    ref_bonus = torch.zeros(batch_size, dtype=torch.int32, device=device)
+    capped_threshold_acc = max(threshold_acc, 1e-9)
+
+    for i in range(batch_size):
+        prob_acc = 0.0
+        coin = float(uniform_samples[i, 0].item())
+        n_accepted = 0
+        cur_pos = 0  # which target_probs row we're looking at
+
+        for j in range(1, draft_len):
+            draft_token_id = int(candidates[i, j].item())
+            target_prob = float(target_probs[i, cur_pos, draft_token_id].item())
+            prob_acc += target_prob
+
+            if coin <= prob_acc / capped_threshold_acc or target_prob >= threshold_single:
+                n_accepted += 1
+                prob_acc = 0.0
+                cur_pos = j
+                coin = float(uniform_samples[i, j].item())
+            else:
+                break
+
+        ref_accept_len[i] = n_accepted
+
+        # Sample bonus from target_probs[cur_pos]
+        tp = target_probs[i, cur_pos]
+        u = float(uniform_samples_final[i].item()) * float(tp.sum().item())
+        cdf = torch.cumsum(tp, dim=0)
+        nonzero = (cdf >= u).nonzero(as_tuple=True)[0]
+        ref_bonus[i] = int(nonzero[0].item()) if len(nonzero) > 0 else vocab_size - 1
+
+    # --- Kernel ---
+    accept_len, bonus = torch.ops.aiter.chain_speculative_sampling(
+        candidates,
+        target_probs,
+        uniform_samples,
+        uniform_samples_final,
+        threshold_single,
+        threshold_acc,
+        True,  # deterministic
+    )
+
+    # accept_length must match exactly
+    torch.testing.assert_close(accept_len, ref_accept_len)
+    # bonus token should match (deterministic mode)
+    torch.testing.assert_close(bonus, ref_bonus)
+
+
 def _create_controlled_probs(scenario: str, vocab_size: int = 1000):
     """
     Create probability distributions with well-separated values where

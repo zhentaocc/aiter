@@ -816,6 +816,121 @@ __global__ void TopKRenormProbKernel(
     }
 }
 
+/*!
+ * \brief Chain speculative sampling verification kernel for DFlash.
+ *
+ * For each batch element, walks a linear chain of draft tokens and uses
+ * threshold-based acceptance (same as SGLang's tree_speculative_sampling_target_only
+ * with topk=1, i.e. a linear chain instead of a tree).
+ *
+ * Acceptance rule at position j:
+ *   accept if  coin <= prob_acc / threshold_acc  OR  target_prob >= threshold_single
+ *
+ * On rejection (or after all accepted), samples a bonus token from
+ * relu(target_probs - draft_probs) using the DeviceSamplingFromProb helper.
+ *
+ * Template params mirror TreeSpeculativeSamplingTargetOnly.
+ */
+template <uint32_t BLOCK_THREADS_,
+          BlockScanAlgorithm SCAN_ALGORITHM,
+          BlockReduceAlgorithm REDUCE_ALGORITHM,
+          uint32_t VEC_SIZE,
+          bool DETERMINISTIC,
+          typename DType>
+__global__ void ChainSpeculativeSamplingKernel(
+    int32_t* accept_length,                    // [bs] output: number of accepted tokens
+    int32_t* bonus_token_ids,                  // [bs] output: bonus token id
+    int64_t* candidates,                       // [bs, draft_len]
+    DType* target_probs,                       // [bs, draft_len, vocab_size]
+    DType* uniform_samples,                    // [bs, draft_len]
+    DType* uniform_samples_for_final_sampling, // [bs]
+    uint32_t batch_size,
+    uint32_t draft_len,
+    uint32_t d,                                // vocab_size
+    DType threshold_single,
+    DType threshold_acc)
+{
+    const uint32_t bx = blockIdx.x, tx = threadIdx.x;
+
+    extern __shared__ __align__(alignof(SamplingTempStorage<BLOCK_THREADS_, SCAN_ALGORITHM, REDUCE_ALGORITHM>))
+        uint8_t smem_sampling[];
+    auto& temp_storage =
+        reinterpret_cast<SamplingTempStorage<BLOCK_THREADS_, SCAN_ALGORITHM, REDUCE_ALGORITHM>&>(smem_sampling);
+
+    DType prob_acc = 0.0;
+    // cur_prob_offset points to the target_probs row for the *current* verification position
+    uint32_t cur_prob_offset = bx * draft_len * d;  // starts at position 0
+    DType coin = uniform_samples[bx * draft_len];
+    uint32_t num_accepted = 0;
+
+    for (uint32_t j = 1; j < draft_len; ++j) {
+        int64_t draft_token_id = candidates[bx * draft_len + j];
+        DType target_prob_single = target_probs[cur_prob_offset + draft_token_id];
+        prob_acc += target_prob_single;
+
+        if (coin <= prob_acc / threshold_acc || target_prob_single >= threshold_single) {
+            // accept token
+            prob_acc = 0.;
+            cur_prob_offset = (bx * draft_len + j) * d;
+            coin = uniform_samples[bx * draft_len + j];
+            ++num_accepted;
+        } else {
+            // rejected — bonus token will be sampled below from this position
+            break;
+        }
+    }
+
+    if (tx == 0) {
+        accept_length[bx] = num_accepted;
+    }
+
+    // Sample bonus token from relu(target_probs[cur_position] - 0)
+    // (DFlash: draft_probs are effectively zero, so relu(q-p) = q)
+    coin = uniform_samples_for_final_sampling[bx];
+
+    DType sum_q(0);
+    vec_t<DType, VEC_SIZE> q_vec;
+    for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS_ * VEC_SIZE); ++i) {
+        q_vec.fill(DType(0));
+        if ((i * BLOCK_THREADS_ + tx) * VEC_SIZE < d) {
+            q_vec.load(target_probs + cur_prob_offset + i * BLOCK_THREADS_ * VEC_SIZE + tx * VEC_SIZE);
+        }
+        DType local_sum = 0;
+#pragma unroll
+        for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+            local_sum += q_vec[j];
+        }
+        sum_q += BlockReduce<DType, BLOCK_THREADS_, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+                     .Sum(local_sum);
+        __syncthreads();
+    }
+    if (tx == 0) {
+        temp_storage.block_aggregate.value = sum_q;
+    }
+    temp_storage.sampled_id = d - 1;
+    __syncthreads();
+    sum_q = temp_storage.block_aggregate.value;
+    DType u = coin * sum_q;
+
+    DType aggregate(0);
+    for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS_ * VEC_SIZE); ++i) {
+        q_vec.fill(DType(0));
+        if ((i * BLOCK_THREADS_ + tx) * VEC_SIZE < d) {
+            q_vec.load(target_probs + cur_prob_offset + i * BLOCK_THREADS_ * VEC_SIZE + tx * VEC_SIZE);
+        }
+
+        DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS_, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+            i, d, [&](DType x) { return x > 0; }, u, q_vec, aggregate, &temp_storage);
+        if (aggregate > u) {
+            break;
+        }
+    }
+    __syncthreads();
+    if (tx == 0) {
+        bonus_token_ids[bx] = temp_storage.sampled_id;
+    }
+}
+
 } // namespace sampling
 
 } // namespace aiter

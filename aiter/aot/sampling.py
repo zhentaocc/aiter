@@ -10,6 +10,9 @@ from csrc.cpp_itfs.sampling.top_p_sampling_from_probs import (
 from csrc.cpp_itfs.sampling.top_k_top_p_sampling_from_probs import (
     compile as top_k_top_p_sampling_from_probs_compile,
 )
+from csrc.cpp_itfs.sampling.chain_speculative_sampling import (
+    compile as chain_speculative_sampling_compile,
+)
 
 TopKRenormConfig = namedtuple(
     "TopKRenormConfig",
@@ -26,6 +29,11 @@ TopKTopPSamplingConfig = namedtuple(
     ["vec_size", "deterministic", "func_name"],
 )
 
+ChainSpecSamplingConfig = namedtuple(
+    "ChainSpecSamplingConfig",
+    ["vec_size", "deterministic", "func_name"],
+)
+
 
 def process_top_k_renorm_config(config):
     return top_k_renorm_probs_compile(config.vec_size)
@@ -37,6 +45,12 @@ def process_top_p_sampling_config(config):
 
 def process_top_k_top_p_sampling_config(config):
     return top_k_top_p_sampling_from_probs_compile(
+        config.vec_size, config.deterministic
+    )
+
+
+def process_chain_spec_sampling_config(config):
+    return chain_speculative_sampling_compile(
         config.vec_size, config.deterministic
     )
 
@@ -76,6 +90,18 @@ def main():
                 )
             )
 
+    # Generate configs for chain_speculative_sampling
+    chain_spec_configs = []
+    for vec_size in range(1, 5):
+        for deterministic in [False, True]:
+            chain_spec_configs.append(
+                ChainSpecSamplingConfig(
+                    vec_size=vec_size,
+                    deterministic=deterministic,
+                    func_name="chain_speculative_sampling",
+                )
+            )
+
     max_jobs = int(os.environ.get("MAX_JOBS", os.cpu_count() or 16))
 
     # Process all configs in parallel
@@ -83,6 +109,7 @@ def main():
         executor.map(process_top_k_renorm_config, top_k_renorm_configs)
         executor.map(process_top_p_sampling_config, top_p_sampling_configs)
         executor.map(process_top_k_top_p_sampling_config, top_k_top_p_sampling_configs)
+        executor.map(process_chain_spec_sampling_config, chain_spec_configs)
 
 
 if __name__ == "__main__":
