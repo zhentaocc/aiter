@@ -144,7 +144,7 @@ def chain_speculative_sampling(
     threshold_single: float,
     threshold_acc: float,
     deterministic: bool = True,
-) -> torch.Tensor:
+):
     return chain_speculative_sampling_core(
         candidates,
         target_probs,
@@ -154,10 +154,3 @@ def chain_speculative_sampling(
         threshold_acc,
         deterministic,
     )
-
-
-direct_register_custom_op(
-    "chain_speculative_sampling",
-    chain_speculative_sampling,
-    [],
-)

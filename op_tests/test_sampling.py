@@ -205,7 +205,7 @@ def test_chain_speculative_sampling(
         ref_bonus[i] = int(nonzero[0].item()) if len(nonzero) > 0 else vocab_size - 1
 
     # --- Kernel ---
-    accept_len, bonus = torch.ops.aiter.chain_speculative_sampling(
+    accept_len, bonus = sampling.chain_speculative_sampling(
         candidates,
         target_probs,
         uniform_samples,
