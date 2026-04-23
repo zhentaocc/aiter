@@ -73,6 +73,40 @@ def test_top_k_renorm_probs(batch_size, vocab_size, k):
 
 @pytest.mark.parametrize("batch_size", [1, 19, 99, 989])
 @pytest.mark.parametrize("vocab_size", [111, 500, 32000, 128256])
+@pytest.mark.parametrize("p", [0.1, 0.5, 0.9])
+def test_top_p_renorm_probs(batch_size, vocab_size, p):
+    torch.manual_seed(42)
+    pre_norm_prob = torch.rand(batch_size, vocab_size).to(0)
+    normalized_prob = pre_norm_prob / pre_norm_prob.sum(dim=-1, keepdim=True)
+
+    # Compute ground truth: sort descending, keep tokens whose cumulative
+    # probability (from largest to smallest) is within p, renormalize.
+    sorted_prob, sorted_indices = torch.sort(normalized_prob, descending=True)
+    cumsum = torch.cumsum(sorted_prob, dim=-1)
+    # Keep tokens where cumsum - prob_i < p  (i.e. the token is within the nucleus)
+    mask_sorted = (cumsum - sorted_prob) < p
+    sorted_prob_masked = sorted_prob * mask_sorted
+    # Scatter back to original positions
+    renorm_prob_ground_truth = torch.zeros_like(normalized_prob)
+    renorm_prob_ground_truth.scatter_(1, sorted_indices, sorted_prob_masked)
+    renorm_prob_ground_truth = renorm_prob_ground_truth / renorm_prob_ground_truth.sum(
+        dim=-1, keepdim=True
+    ).clamp(min=1e-8)
+
+    renorm_prob = torch.ops.aiter.top_p_renorm_probs(
+        normalized_prob, *_to_tensor_scalar_tuple(p)
+    )
+    for i in range(batch_size):
+        torch.testing.assert_close(
+            renorm_prob_ground_truth[i],
+            renorm_prob[i],
+            rtol=1e-3,
+            atol=1e-3,
+        )
+
+
+@pytest.mark.parametrize("batch_size", [1, 19, 99, 989])
+@pytest.mark.parametrize("vocab_size", [111, 500, 32000, 128256])
 @pytest.mark.parametrize("p", [0.1, 0.5])
 @pytest.mark.parametrize("k", [1, 10, 50])
 def test_top_k_top_p_joint_sampling_from_probs(batch_size, vocab_size, p, k):

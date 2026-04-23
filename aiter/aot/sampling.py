@@ -4,6 +4,9 @@ import concurrent.futures
 from csrc.cpp_itfs.sampling.top_k_renorm_probs import (
     compile as top_k_renorm_probs_compile,
 )
+from csrc.cpp_itfs.sampling.top_p_renorm_probs import (
+    compile as top_p_renorm_probs_compile,
+)
 from csrc.cpp_itfs.sampling.top_p_sampling_from_probs import (
     compile as top_p_sampling_from_probs_compile,
 )
@@ -13,6 +16,11 @@ from csrc.cpp_itfs.sampling.top_k_top_p_sampling_from_probs import (
 
 TopKRenormConfig = namedtuple(
     "TopKRenormConfig",
+    ["vec_size", "func_name"],
+)
+
+TopPRenormConfig = namedtuple(
+    "TopPRenormConfig",
     ["vec_size", "func_name"],
 )
 
@@ -29,6 +37,10 @@ TopKTopPSamplingConfig = namedtuple(
 
 def process_top_k_renorm_config(config):
     return top_k_renorm_probs_compile(config.vec_size)
+
+
+def process_top_p_renorm_config(config):
+    return top_p_renorm_probs_compile(config.vec_size)
 
 
 def process_top_p_sampling_config(config):
@@ -49,6 +61,16 @@ def main():
             TopKRenormConfig(
                 vec_size=vec_size,
                 func_name="top_k_renorm_probs",
+            )
+        )
+
+    # Generate configs for top_p_renorm_probs
+    top_p_renorm_configs = []
+    for vec_size in range(1, 5):
+        top_p_renorm_configs.append(
+            TopPRenormConfig(
+                vec_size=vec_size,
+                func_name="top_p_renorm_probs",
             )
         )
 
@@ -81,6 +103,7 @@ def main():
     # Process all configs in parallel
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_jobs) as executor:
         executor.map(process_top_k_renorm_config, top_k_renorm_configs)
+        executor.map(process_top_p_renorm_config, top_p_renorm_configs)
         executor.map(process_top_p_sampling_config, top_p_sampling_configs)
         executor.map(process_top_k_top_p_sampling_config, top_k_top_p_sampling_configs)
 

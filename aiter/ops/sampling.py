@@ -7,6 +7,9 @@ from typing import Optional
 from csrc.cpp_itfs.sampling.top_k_renorm_probs import (
     top_k_renorm_probs as top_k_renorm_probs_core,
 )
+from csrc.cpp_itfs.sampling.top_p_renorm_probs import (
+    top_p_renorm_probs as top_p_renorm_probs_core,
+)
 from csrc.cpp_itfs.sampling.top_p_sampling_from_probs import (
     top_p_sampling_from_probs as top_p_sampling_from_probs_core,
 )
@@ -31,6 +34,25 @@ def top_k_renorm_probs(
 direct_register_custom_op(
     "top_k_renorm_probs",
     top_k_renorm_probs,
+    [],
+)
+
+
+def top_p_renorm_probs(
+    probs: torch.Tensor,
+    maybe_top_p_arr: Optional[torch.Tensor],
+    top_p_val: float,
+) -> torch.Tensor:
+    return top_p_renorm_probs_core(
+        probs,
+        maybe_top_p_arr,
+        top_p_val,
+    )
+
+
+direct_register_custom_op(
+    "top_p_renorm_probs",
+    top_p_renorm_probs,
     [],
 )
 
