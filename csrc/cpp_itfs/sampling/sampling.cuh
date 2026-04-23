@@ -961,6 +961,288 @@ __global__ void TopPRenormProbKernel(
     }
 }
 
+
+/*!
+ * \brief Chain speculative sampling verification kernel for DFlash.
+ *
+ * For each batch element, walks a linear chain of draft tokens and uses
+ * threshold-based acceptance (same as SGLang's tree_speculative_sampling_target_only
+ * with topk=1, i.e. a linear chain instead of a tree).
+ *
+ * Acceptance rule at position j:
+ *   accept if  coin <= prob_acc / threshold_acc  OR  target_prob >= threshold_single
+ *
+ * On rejection (or after all accepted), samples a bonus token from
+ * relu(target_probs - draft_probs) using the DeviceSamplingFromProb helper.
+ *
+ * Template params mirror TreeSpeculativeSamplingTargetOnly.
+ */
+template <uint32_t BLOCK_THREADS_,
+          BlockScanAlgorithm SCAN_ALGORITHM,
+          BlockReduceAlgorithm REDUCE_ALGORITHM,
+          uint32_t VEC_SIZE,
+          bool DETERMINISTIC,
+          typename DType>
+__global__ void ChainSpeculativeSamplingKernel(
+    int32_t* accept_length,                    // [bs] output: number of accepted tokens
+    int32_t* bonus_token_ids,                  // [bs] output: bonus token id
+    int64_t* candidates,                       // [bs, draft_len]
+    DType* target_probs,                       // [bs, draft_len, vocab_size]
+    DType* uniform_samples,                    // [bs, draft_len]
+    DType* uniform_samples_for_final_sampling, // [bs]
+    uint32_t batch_size,
+    uint32_t draft_len,
+    uint32_t d,                                // vocab_size
+    DType threshold_single,
+    DType threshold_acc)
+{
+    const uint32_t bx = blockIdx.x, tx = threadIdx.x;
+
+    extern __shared__ __align__(alignof(SamplingTempStorage<BLOCK_THREADS_, SCAN_ALGORITHM, REDUCE_ALGORITHM>))
+        uint8_t smem_sampling[];
+    auto& temp_storage =
+        reinterpret_cast<SamplingTempStorage<BLOCK_THREADS_, SCAN_ALGORITHM, REDUCE_ALGORITHM>&>(smem_sampling);
+
+    DType prob_acc = 0.0;
+    // cur_prob_offset points to the target_probs row for the *current* verification position
+    uint32_t cur_prob_offset = bx * draft_len * d;  // starts at position 0
+    DType coin = uniform_samples[bx * draft_len];
+    uint32_t num_accepted = 0;
+
+    for (uint32_t j = 1; j < draft_len; ++j) {
+        int64_t draft_token_id = candidates[bx * draft_len + j];
+        DType target_prob_single = target_probs[cur_prob_offset + draft_token_id];
+        prob_acc += target_prob_single;
+
+        if (coin <= prob_acc / threshold_acc || target_prob_single >= threshold_single) {
+            // accept token
+            prob_acc = 0.;
+            cur_prob_offset = (bx * draft_len + j) * d;
+            coin = uniform_samples[bx * draft_len + j];
+            ++num_accepted;
+        } else {
+            // rejected — bonus token will be sampled below from this position
+            break;
+        }
+    }
+
+    if (tx == 0) {
+        accept_length[bx] = num_accepted;
+    }
+
+    // Sample bonus token from relu(target_probs[cur_position] - 0)
+    // (DFlash: draft_probs are effectively zero, so relu(q-p) = q)
+    coin = uniform_samples_for_final_sampling[bx];
+
+    DType sum_q(0);
+    vec_t<DType, VEC_SIZE> q_vec;
+    for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS_ * VEC_SIZE); ++i) {
+        q_vec.fill(DType(0));
+        if ((i * BLOCK_THREADS_ + tx) * VEC_SIZE < d) {
+            q_vec.load(target_probs + cur_prob_offset + i * BLOCK_THREADS_ * VEC_SIZE + tx * VEC_SIZE);
+        }
+        DType local_sum = 0;
+#pragma unroll
+        for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+            local_sum += q_vec[j];
+        }
+        sum_q += BlockReduce<DType, BLOCK_THREADS_, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+                     .Sum(local_sum);
+        __syncthreads();
+    }
+    if (tx == 0) {
+        temp_storage.block_aggregate.value = sum_q;
+    }
+    temp_storage.sampled_id = d - 1;
+    __syncthreads();
+    sum_q = temp_storage.block_aggregate.value;
+    DType u = coin * sum_q;
+
+    DType aggregate(0);
+    for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS_ * VEC_SIZE); ++i) {
+        q_vec.fill(DType(0));
+        if ((i * BLOCK_THREADS_ + tx) * VEC_SIZE < d) {
+            q_vec.load(target_probs + cur_prob_offset + i * BLOCK_THREADS_ * VEC_SIZE + tx * VEC_SIZE);
+        }
+
+        DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS_, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+            i, d, [&](DType x) { return x > 0; }, u, q_vec, aggregate, &temp_storage);
+        if (aggregate > u) {
+            break;
+        }
+    }
+    __syncthreads();
+    if (tx == 0) {
+        bonus_token_ids[bx] = temp_storage.sampled_id;
+    }
+}
+
+
+
+/*!
+ * \brief Fused top-k + top-p probability renormalization kernel.
+ *
+ * Applies BOTH top-k (count) and top-p (probability mass) constraints in a
+ * single kernel launch.  The acceptance criterion at each pivot is:
+ *   count(probs > pivot) < k  AND  sum(probs > pivot) < p
+ * i.e. the token is kept only if it passes both thresholds.
+ *
+ * This avoids two sequential kernel launches (top_k_renorm then top_p_renorm).
+ */
+template <uint32_t BLOCK_THREADS,
+          BlockReduceAlgorithm REDUCE_ALGORITHM,
+          uint32_t VEC_SIZE,
+          typename DType,
+          typename IdType>
+__global__ void TopKTopPRenormProbKernel(
+    DType* probs,
+    DType* renormed_prob,
+    IdType* top_k_arr,
+    uint32_t top_k_val,
+    float* top_p_arr,
+    float top_p_val,
+    uint32_t d)
+{
+    const uint32_t bx = blockIdx.x, tx = threadIdx.x;
+    const uint32_t row_idx = bx;
+    uint32_t k = top_k_arr == nullptr ? top_k_val : top_k_arr[bx];
+    float p    = top_p_arr == nullptr ? top_p_val : top_p_arr[bx];
+    double pivot = -infinity<float>(), normalizer = 1;
+    vec_t<float, VEC_SIZE> probs_vec;
+
+    extern __shared__ __align__(alignof(RenormTempStorage<BLOCK_THREADS, REDUCE_ALGO>))
+        uint8_t smem_renorm[];
+    auto& temp_storage =
+        reinterpret_cast<RenormTempStorage<BLOCK_THREADS, REDUCE_ALGO>&>(smem_renorm);
+    temp_storage.max_val = 0;
+
+    float max_val = GetMaxValue<VEC_SIZE,
+                                BLOCK_THREADS,
+                                REDUCE_ALGORITHM,
+                                RenormTempStorage<BLOCK_THREADS, REDUCE_ALGORITHM>>(
+        probs, row_idx, d, temp_storage);
+
+    double low = 0, high = max_val;
+    float min_gt_low, max_le_high;
+    float sum_low = 1;
+    // Binary search for the pivot satisfying both:
+    //   count(probs > pivot) < k  AND  sum(probs > pivot) < p
+    // The loop invariant and stopping condition mirror TopKRenormProbKernel
+    // but the acceptance test combines both constraints.
+    do
+    {
+        double pivot_0 = (high + 2 * low) / 3;
+        double pivot_1 = (2 * high + low) / 3;
+
+        ValueCount<float> aggregate_gt_pivot_0{0, 0}, aggregate_gt_pivot_1{0, 0};
+        min_gt_low  = high;
+        max_le_high = low;
+#pragma unroll 2
+        for(uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i)
+        {
+            probs_vec.fill(0);
+            if((i * BLOCK_THREADS + tx) * VEC_SIZE < d)
+            {
+                probs_vec.cast_load(probs + row_idx * d + i * BLOCK_THREADS * VEC_SIZE +
+                                    tx * VEC_SIZE);
+            }
+            ValueCount<float> probs_gt_pivot_0_pair[VEC_SIZE], probs_gt_pivot_1_pair[VEC_SIZE];
+#pragma unroll
+            for(uint32_t j = 0; j < VEC_SIZE; ++j)
+            {
+                probs_gt_pivot_0_pair[j] = {
+                    (probs_vec[j] > pivot_0) ? probs_vec[j] : 0,
+                    (probs_vec[j] > pivot_0 && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)};
+                probs_gt_pivot_1_pair[j] = {
+                    (probs_vec[j] > pivot_1) ? probs_vec[j] : 0,
+                    (probs_vec[j] > pivot_1 && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)};
+
+                if(probs_vec[j] > low && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)
+                {
+                    min_gt_low = min(min_gt_low, probs_vec[j]);
+                }
+                if(probs_vec[j] <= high && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)
+                {
+                    max_le_high = max(max_le_high, probs_vec[j]);
+                }
+            }
+
+            aggregate_gt_pivot_0 +=
+                BlockReduce<ValueCount<float>, BLOCK_THREADS, REDUCE_ALGORITHM>(
+                    temp_storage.block_prim.reduce_value_count)
+                    .Sum(probs_gt_pivot_0_pair);
+            __syncthreads();
+
+            aggregate_gt_pivot_1 +=
+                BlockReduce<ValueCount<float>, BLOCK_THREADS, REDUCE_ALGORITHM>(
+                    temp_storage.block_prim.reduce_value_count)
+                    .Sum(probs_gt_pivot_1_pair);
+            __syncthreads();
+        }
+        min_gt_low =
+            BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+                .Reduce(min_gt_low, hipcub::Min());
+        __syncthreads();
+        max_le_high =
+            BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+                .Reduce(max_le_high, hipcub::Max());
+        if(tx == 0)
+        {
+            temp_storage.block_aggregate.pairs[0] = aggregate_gt_pivot_0;
+            temp_storage.block_aggregate.pairs[1] = aggregate_gt_pivot_1;
+            temp_storage.min_val                   = min_gt_low;
+            temp_storage.max_val                   = max_le_high;
+        }
+        __syncthreads();
+        aggregate_gt_pivot_0 = temp_storage.block_aggregate.pairs[0];
+        aggregate_gt_pivot_1 = temp_storage.block_aggregate.pairs[1];
+        min_gt_low           = temp_storage.min_val;
+        max_le_high          = temp_storage.max_val;
+
+        // Accept pivot if BOTH constraints pass: count < k AND sum < p
+        if(aggregate_gt_pivot_1.count >= k || aggregate_gt_pivot_1.value >= p)
+        {
+            low     = pivot_1;
+            sum_low = float(aggregate_gt_pivot_1.value);
+        }
+        else if(aggregate_gt_pivot_0.count >= k || aggregate_gt_pivot_0.value >= p)
+        {
+            low     = pivot_0;
+            high    = min(pivot_1, max_le_high);
+            sum_low = float(aggregate_gt_pivot_0.value);
+        }
+        else
+        {
+            high = min(pivot_0, max_le_high);
+        }
+    } while(min_gt_low != max_le_high);
+
+    normalizer = __frcp_rn(max(sum_low, 1e-8f));
+    pivot      = low;
+
+    // normalize
+#pragma unroll 2
+    for(uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i)
+    {
+        probs_vec.fill(0);
+        if((i * BLOCK_THREADS + tx) * VEC_SIZE < d)
+        {
+            probs_vec.cast_load(probs + row_idx * d + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+        }
+#pragma unroll
+        for(uint32_t j = 0; j < VEC_SIZE; ++j)
+        {
+            probs_vec[j] = (probs_vec[j] > pivot) ? probs_vec[j] * normalizer : 0;
+        }
+        if((i * BLOCK_THREADS + tx) * VEC_SIZE < d)
+        {
+            probs_vec.store(renormed_prob + row_idx * d + i * BLOCK_THREADS * VEC_SIZE +
+                            tx * VEC_SIZE);
+        }
+    }
+}
+
+
 } // namespace sampling
 
 } // namespace aiter
