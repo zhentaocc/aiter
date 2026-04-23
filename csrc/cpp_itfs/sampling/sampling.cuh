@@ -816,6 +816,169 @@ __global__ void TopKRenormProbKernel(
     }
 }
 
+/*!
+ * \brief Fused top-k + top-p probability renormalization kernel.
+ *
+ * Applies BOTH top-k (count) and top-p (probability mass) constraints in a
+ * single kernel launch.  The acceptance criterion at each pivot is:
+ *   count(probs > pivot) < k  AND  sum(probs > pivot) < p
+ * i.e. the token is kept only if it passes both thresholds.
+ *
+ * This avoids two sequential kernel launches (top_k_renorm then top_p_renorm).
+ */
+template <uint32_t BLOCK_THREADS,
+          BlockReduceAlgorithm REDUCE_ALGORITHM,
+          uint32_t VEC_SIZE,
+          typename DType,
+          typename IdType>
+__global__ void TopKTopPRenormProbKernel(
+    DType* probs,
+    DType* renormed_prob,
+    IdType* top_k_arr,
+    uint32_t top_k_val,
+    float* top_p_arr,
+    float top_p_val,
+    uint32_t d)
+{
+    const uint32_t bx = blockIdx.x, tx = threadIdx.x;
+    const uint32_t row_idx = bx;
+    uint32_t k = top_k_arr == nullptr ? top_k_val : top_k_arr[bx];
+    float p    = top_p_arr == nullptr ? top_p_val : top_p_arr[bx];
+    double pivot = -infinity<float>(), normalizer = 1;
+    vec_t<float, VEC_SIZE> probs_vec;
+
+    extern __shared__ __align__(alignof(RenormTempStorage<BLOCK_THREADS, REDUCE_ALGO>))
+        uint8_t smem_renorm[];
+    auto& temp_storage =
+        reinterpret_cast<RenormTempStorage<BLOCK_THREADS, REDUCE_ALGO>&>(smem_renorm);
+    temp_storage.max_val = 0;
+
+    float max_val = GetMaxValue<VEC_SIZE,
+                                BLOCK_THREADS,
+                                REDUCE_ALGORITHM,
+                                RenormTempStorage<BLOCK_THREADS, REDUCE_ALGORITHM>>(
+        probs, row_idx, d, temp_storage);
+
+    double low = 0, high = max_val;
+    float min_gt_low, max_le_high;
+    float sum_low = 1;
+    // Binary search for the pivot satisfying both:
+    //   count(probs > pivot) < k  AND  sum(probs > pivot) < p
+    // The loop invariant and stopping condition mirror TopKRenormProbKernel
+    // but the acceptance test combines both constraints.
+    do
+    {
+        double pivot_0 = (high + 2 * low) / 3;
+        double pivot_1 = (2 * high + low) / 3;
+
+        ValueCount<float> aggregate_gt_pivot_0{0, 0}, aggregate_gt_pivot_1{0, 0};
+        min_gt_low  = high;
+        max_le_high = low;
+#pragma unroll 2
+        for(uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i)
+        {
+            probs_vec.fill(0);
+            if((i * BLOCK_THREADS + tx) * VEC_SIZE < d)
+            {
+                probs_vec.cast_load(probs + row_idx * d + i * BLOCK_THREADS * VEC_SIZE +
+                                    tx * VEC_SIZE);
+            }
+            ValueCount<float> probs_gt_pivot_0_pair[VEC_SIZE], probs_gt_pivot_1_pair[VEC_SIZE];
+#pragma unroll
+            for(uint32_t j = 0; j < VEC_SIZE; ++j)
+            {
+                probs_gt_pivot_0_pair[j] = {
+                    (probs_vec[j] > pivot_0) ? probs_vec[j] : 0,
+                    (probs_vec[j] > pivot_0 && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)};
+                probs_gt_pivot_1_pair[j] = {
+                    (probs_vec[j] > pivot_1) ? probs_vec[j] : 0,
+                    (probs_vec[j] > pivot_1 && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)};
+
+                if(probs_vec[j] > low && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)
+                {
+                    min_gt_low = min(min_gt_low, probs_vec[j]);
+                }
+                if(probs_vec[j] <= high && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d)
+                {
+                    max_le_high = max(max_le_high, probs_vec[j]);
+                }
+            }
+
+            aggregate_gt_pivot_0 +=
+                BlockReduce<ValueCount<float>, BLOCK_THREADS, REDUCE_ALGORITHM>(
+                    temp_storage.block_prim.reduce_value_count)
+                    .Sum(probs_gt_pivot_0_pair);
+            __syncthreads();
+
+            aggregate_gt_pivot_1 +=
+                BlockReduce<ValueCount<float>, BLOCK_THREADS, REDUCE_ALGORITHM>(
+                    temp_storage.block_prim.reduce_value_count)
+                    .Sum(probs_gt_pivot_1_pair);
+            __syncthreads();
+        }
+        min_gt_low =
+            BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+                .Reduce(min_gt_low, hipcub::Min());
+        __syncthreads();
+        max_le_high =
+            BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+                .Reduce(max_le_high, hipcub::Max());
+        if(tx == 0)
+        {
+            temp_storage.block_aggregate.pairs[0] = aggregate_gt_pivot_0;
+            temp_storage.block_aggregate.pairs[1] = aggregate_gt_pivot_1;
+            temp_storage.min_val                   = min_gt_low;
+            temp_storage.max_val                   = max_le_high;
+        }
+        __syncthreads();
+        aggregate_gt_pivot_0 = temp_storage.block_aggregate.pairs[0];
+        aggregate_gt_pivot_1 = temp_storage.block_aggregate.pairs[1];
+        min_gt_low           = temp_storage.min_val;
+        max_le_high          = temp_storage.max_val;
+
+        // Accept pivot if BOTH constraints pass: count < k AND sum < p
+        if(aggregate_gt_pivot_1.count >= k || aggregate_gt_pivot_1.value >= p)
+        {
+            low     = pivot_1;
+            sum_low = float(aggregate_gt_pivot_1.value);
+        }
+        else if(aggregate_gt_pivot_0.count >= k || aggregate_gt_pivot_0.value >= p)
+        {
+            low     = pivot_0;
+            high    = min(pivot_1, max_le_high);
+            sum_low = float(aggregate_gt_pivot_0.value);
+        }
+        else
+        {
+            high = min(pivot_0, max_le_high);
+        }
+    } while(min_gt_low != max_le_high);
+
+    normalizer = __frcp_rn(max(sum_low, 1e-8f));
+    pivot      = low;
+
+    // normalize
+#pragma unroll 2
+    for(uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i)
+    {
+        probs_vec.fill(0);
+        if((i * BLOCK_THREADS + tx) * VEC_SIZE < d)
+        {
+            probs_vec.cast_load(probs + row_idx * d + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+        }
+#pragma unroll
+        for(uint32_t j = 0; j < VEC_SIZE; ++j)
+        {
+            probs_vec[j] = (probs_vec[j] > pivot) ? probs_vec[j] * normalizer : 0;
+        }
+        if((i * BLOCK_THREADS + tx) * VEC_SIZE < d)
+        {
+            probs_vec.store(renormed_prob + row_idx * d + i * BLOCK_THREADS * VEC_SIZE +
+                            tx * VEC_SIZE);
+        }
+    }
+}
+
 } // namespace sampling
 
 } // namespace aiter

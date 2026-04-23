@@ -115,6 +115,48 @@ def test_top_k_top_p_joint_sampling_from_probs(batch_size, vocab_size, p, k):
         ]
 
 
+@pytest.mark.parametrize("batch_size", [1, 19, 99])
+@pytest.mark.parametrize("vocab_size", [111, 500, 32000])
+@pytest.mark.parametrize("p", [0.5, 0.9])
+@pytest.mark.parametrize("k", [10, 100])
+def test_top_k_top_p_renorm_probs(batch_size, vocab_size, p, k):
+    if k > vocab_size:
+        pytest.skip("k should be less than vocab_size")
+    torch.manual_seed(42)
+    pre_norm_prob = torch.rand(batch_size, vocab_size).to(0)
+    normalized_prob = pre_norm_prob / pre_norm_prob.sum(dim=-1, keepdim=True)
+
+    # Ground truth: apply top-k mask, then top-p mask, then renormalize
+    sorted_prob_desc, _ = torch.sort(normalized_prob, descending=True)
+    pivot_k = sorted_prob_desc[:, k - 1]
+    mask_topk = (normalized_prob >= pivot_k.unsqueeze(-1))
+
+    sorted_prob_asc, indices_asc = torch.sort(normalized_prob, descending=False)
+    cdf = torch.cumsum(sorted_prob_asc, dim=-1)
+    # top-p: keep tokens in the nucleus (cumsum from top exceeds 1-p)
+    in_topp_sorted = cdf > (1 - p)
+    mask_topp = torch.zeros_like(normalized_prob, dtype=torch.bool)
+    mask_topp.scatter_(1, indices_asc, in_topp_sorted)
+
+    mask = mask_topk & mask_topp
+    renorm_gt = normalized_prob * mask.float()
+    renorm_gt = renorm_gt / renorm_gt.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+
+    renorm_prob = torch.ops.aiter.top_k_top_p_renorm_probs(
+        normalized_prob,
+        *_to_tensor_scalar_tuple(k),
+        *_to_tensor_scalar_tuple(p),
+    )
+
+    for i in range(batch_size):
+        torch.testing.assert_close(
+            renorm_gt[i],
+            renorm_prob[i],
+            rtol=1e-3,
+            atol=1e-3,
+        )
+
+
 def _create_controlled_probs(scenario: str, vocab_size: int = 1000):
     """
     Create probability distributions with well-separated values where
