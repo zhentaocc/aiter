@@ -231,6 +231,28 @@ namespace py = pybind11;
           py::arg("kernelId") = 0,    \
           py::arg("splitK")   = 0);
 
+#define BATCHED_GEMM_FP8_BLOCKWISE_PYBIND      \
+    m.def("batched_gemm_fp8_blockwise",        \
+          &batched_gemm_fp8_blockwise,         \
+          "batched_gemm_fp8_blockwise",        \
+          py::arg("XQ"),                       \
+          py::arg("WQ"),                       \
+          py::arg("x_scale"),                  \
+          py::arg("w_scale"),                  \
+          py::arg("Out"));
+
+#define BATCHED_GEMM_FP8_BLOCKWISE_TUNE_PYBIND \
+    m.def("batched_gemm_fp8_blockwise_tune",   \
+          &batched_gemm_fp8_blockwise_tune,    \
+          "batched_gemm_fp8_blockwise_tune",   \
+          py::arg("XQ"),                       \
+          py::arg("WQ"),                       \
+          py::arg("x_scale"),                  \
+          py::arg("w_scale"),                  \
+          py::arg("Out"),                      \
+          py::arg("kernelId") = 0,             \
+          py::arg("splitK")   = 0);
+
 #define DEEPGEMM_PYBIND                      \
     m.def("deepgemm",                        \
           &deepgemm,                         \
