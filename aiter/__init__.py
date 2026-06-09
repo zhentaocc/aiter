@@ -139,3 +139,14 @@ try:
 except (ImportError, AttributeError):
     # Iris or triton not available, skip import
     IRIS_COMM_AVAILABLE = False
+
+# DeepSeek V4 wo_a projection: FP8 block-wise batched GEMM
+# (recipe=(1, 1, 128); matches deep_gemm.fp8_einsum contract).
+try:
+    from .ops.batched_gemm_op_fp8_blockwise import (  # noqa: F401
+        batched_gemm_fp8_blockwise,
+        batched_gemm_fp8_blockwise_einsum,
+        convert_scales_to_ue8m0,
+    )
+except ImportError as _bgfp8_e:
+    logger.debug("batched_gemm_fp8_blockwise wrapper not available: %s", _bgfp8_e)
