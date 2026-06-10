@@ -69,6 +69,26 @@ def _swizzle_xor16(row, col_bytes):
     return col_bytes ^ (rem * 16)
 
 
+def _mfma_scale_32x32x64(result_type, a, b, c, scaleA, scaleB):
+    """Functional wrapper for the 32x32x64 scaled fp8 MFMA.
+
+    flydsl 0.1.3.1 only ships a functional wrapper for the 16x16x128 variant;
+    for 32x32x64 we call the raw rocdl OpView and unwrap operands ourselves
+    (mirrors the 16x16x128 wrapper's body). cbsz/blgp/opselA/opselB = 0 (fp8*fp8).
+    Returns the result SSA value (a v16f32, indexable like the 16x16 result).
+    """
+    return rocdl.mfma_scale_f32_32x32x64_f8f6f4(
+        result_type,
+        rocdl._unwrap_mfma_operand(a),
+        rocdl._unwrap_mfma_operand(b),
+        rocdl._unwrap_mfma_operand(c),
+        0, 0, 0,
+        rocdl._unwrap_mfma_operand(scaleA),
+        0,
+        rocdl._unwrap_mfma_operand(scaleB),
+    ).result
+
+
 # ============================================================================
 # Geometry constants — fixed for v2.
 # ============================================================================
@@ -93,11 +113,12 @@ _LDS_A_BYTES = _BLOCK_M * _BLOCK_K        # 16384
 
 
 @functools.lru_cache(maxsize=None)
-def compile_bgfp8bw_v2_kernel(B: int, M: int, N: int, K: int,
+def compile_bgfp8bw_m32_kernel(B: int, M: int, N: int, K: int,
                                 load_mode: str = "coop",
                                 block_m: int = 128,
                                 block_n: int = 128,
-                                n_waves: int = 4):
+                                n_waves: int = 4,
+                                sched_hint: int = 0):
     """v2 kernel factory. All shape + geometry values baked at compile time.
 
     Geometry (tunable for per-shape autotuning; defaults reproduce the
@@ -129,6 +150,12 @@ def compile_bgfp8bw_v2_kernel(B: int, M: int, N: int, K: int,
     _N_PER_WAVE = _BLOCK_N // _N_WAVES
     _M_SUB = _BLOCK_M // 16
     _N_SUB = _N_PER_WAVE // 16
+    # ---- 32x32x64 MFMA grid (m32 variant) ----
+    # Each MFMA produces 32M x 32N consuming 32M x 64K (A) and 64K x 32N (B).
+    # BLOCK_K=128 -> KRepeat=2 (two 64-K MFMA steps per K-iter, same accum).
+    _M_SUB32 = _BLOCK_M // 32              # 32-row M-blocks per wave
+    _N_SUB32 = _N_PER_WAVE // 32           # 32-col N-blocks per wave
+    _KREP = _BLOCK_K // 64                 # 2
     _LDS_A_BYTES = _BLOCK_M * _BLOCK_K
     # Cooperative HBM->LDS A load: tile = block_m rows x 128 K-bytes. Each lane
     # DMAs 16 bytes (one 16B col of one row); 8 lanes cover a row's 128 bytes,
@@ -143,11 +170,11 @@ def compile_bgfp8bw_v2_kernel(B: int, M: int, N: int, K: int,
         assert (_BLOCK_M, _BLOCK_N, _N_WAVES) == (128, 128, 4), \
             "solo_* load modes are only supported at the default 128x128/4-wave geometry"
 
-    assert _BLOCK_N <= 128, f"v2 requires block_n <= 128, got {_BLOCK_N}"
+    assert _BLOCK_N <= 128, f"m32 requires block_n <= 128, got {_BLOCK_N}"
     assert _BLOCK_N % _N_WAVES == 0, f"block_n={_BLOCK_N} must divide by n_waves={_N_WAVES}"
-    assert _N_PER_WAVE % 16 == 0 and _N_PER_WAVE >= 16, \
-        f"block_n/n_waves={_N_PER_WAVE} must be a positive multiple of 16"
-    assert _BLOCK_M % 16 == 0, f"block_m={_BLOCK_M} must be a multiple of 16"
+    assert _N_PER_WAVE % 32 == 0 and _N_PER_WAVE >= 32, \
+        f"block_n/n_waves={_N_PER_WAVE} must be a positive multiple of 32 (32x32 MFMA)"
+    assert _BLOCK_M % 32 == 0, f"block_m={_BLOCK_M} must be a multiple of 32 (32x32 MFMA)"
     assert M % _BLOCK_M == 0, f"v2 needs M % {_BLOCK_M} == 0, got M={M}"
     assert N % _BLOCK_N == 0, f"v2 needs N % {_BLOCK_N} == 0, got N={N}"
     assert K % _BLOCK_K == 0, f"v2 needs K % {_BLOCK_K} == 0, got K={K}"
@@ -236,49 +263,46 @@ def compile_bgfp8bw_v2_kernel(B: int, M: int, N: int, K: int,
         # Per-wave N base (each wave handles 32 N starting here)
         wave_n_offset = wave_id * fx.Index(_N_PER_WAVE)    # 0, 32, 64, 96
 
-        # ---- MFMA 16x16x128 lane mapping ----
-        # A operand: lane l holds A[l%16, (l/16)*32 + 0..31]
-        # B operand: lane l holds B[l%16, (l/16)*32 + 0..31]
-        # C accum:   lane l writes C[(l/16)*4 + 0..3, l%16]
-        row = lane % fx.Index(16)
-        k_subtile = lane // fx.Index(16)                  # [0, 4)
-        k_byte_in_lane = k_subtile * fx.Index(32)
-        k_dword_lane = k_subtile * fx.Index(8)            # k_byte_in_lane / 4
+        # ---- MFMA 32x32x64 lane mapping (CDNA4) ----
+        # A operand (32M x 64K, v8i32/lane): lane l holds
+        #   A[l%32, (l//32)*32 + 0..31]    -> row32 = l%32, kgroup = l//32
+        # B operand (64K x 32N, v8i32/lane): lane l holds
+        #   B[l%32, (l//32)*32 + 0..31]
+        # C accum (32M x 32N, v16f32/lane): col = l%32; reg i in 0..15 maps to
+        #   row = (i//4)*8 + (l//32)*4 + (i%4)
+        row32 = lane % fx.Index(32)
+        kgroup = lane // fx.Index(32)                     # [0, 2)
+        k_byte_in_lane = kgroup * fx.Index(32)            # 0 or 32 (within a 64-K MFMA)
+        k_dword_lane = kgroup * fx.Index(8)               # /4
 
         # n_block_idx for W_scale: which 128-N block is this WG in.
-        # block_n <= 128, so a WG falls entirely inside one 128-N block;
-        # for block_n < 128 several WGs share the same block (redundant load).
         n_block_idx = (pid_n * fx.Index(_BLOCK_N)) // fx.Index(128)
 
-        v4f32 = _vec_ty(4, ir.F32Type.get())
+        v16f32 = _vec_ty(16, ir.F32Type.get())
         v8i32 = _vec_ty(8, ir.IntegerType.get_signless(32))
         v4i32_t = _vec_ty(4, ir.IntegerType.get_signless(32))
         v16i8_t = _vec_ty(16, T.i8)
 
-        # ---- Per-wave W base (each wave reads its own 32-N stripe) ----
-        # For lane l, the row of W to read is wave_n_offset + (n_sub*16) + (l%16).
-        # Pre-compute per-(n_sub, lane) row dword bases.
+        # ---- Per-wave W base (each wave reads its own N stripe) ----
+        # For lane l in N-block nb, the W row is wave_n_offset + nb*32 + (l%32).
         w_row_dword_bases = [
             (pid_b * fx.Index(W_BATCH_STRIDE)
              + (pid_n * fx.Index(_BLOCK_N) + wave_n_offset
-                + fx.Index(n_sub * 16) + row) * fx.Index(K))
+                + fx.Index(nb * 32) + row32) * fx.Index(K))
             // fx.Index(4)
-            for n_sub in range_constexpr(_N_SUB)
+            for nb in range_constexpr(_N_SUB32)
         ]
 
-        # ---- Per-(m_sub, lane) M-row index for output store + A_scale lookup ----
-        # m_idx_per_sub_row[m_sub] = pid_m*128 + m_sub*16 + (lane%16)
+        # ---- Per-(m_block, lane) M-row for A_scale lookup ----
         m_row_per_sub = [
-            pid_m * fx.Index(_BLOCK_M) + fx.Index(m_sub * 16) + row
-            for m_sub in range_constexpr(_M_SUB)
+            pid_m * fx.Index(_BLOCK_M) + fx.Index(mb * 32) + row32
+            for mb in range_constexpr(_M_SUB32)
         ]
-        # Output row mapping: lane l writes 4 rows starting at m_sub*16 + (l/16)*4
-        out_row_base = (lane // fx.Index(16)) * fx.Index(4)
 
-        # ---- Initialize 16 accumulators per lane ----
+        # ---- Initialize M_SUB32 x N_SUB32 accumulators (v16f32) per lane ----
         accs = [
-            [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range_constexpr(_N_SUB)]
-            for _ in range_constexpr(_M_SUB)
+            [fx.Vector.filled(16, 0.0, fx.Float32) for _ in range_constexpr(_N_SUB32)]
+            for _ in range_constexpr(_M_SUB32)
         ]
 
         # ---- Phase 3b: async copy (HBM -> LDS, bypass VGPR) ----
@@ -557,74 +581,84 @@ def compile_bgfp8bw_v2_kernel(B: int, M: int, N: int, K: int,
                         results = yield []
                     scf.YieldOp([])
 
-            # ---------- Phase 4b: W load co-issued with A DMA ----------
-            # Issue W loads BEFORE the gpu.barrier so they share the barrier's
-            # vmcnt(0) wait with the A DMA. Net effect: W's HBM latency
-            # (~300 cycles) is absorbed into the A-DMA wait instead of
-            # adding to the critical path between barrier and MFMA.
-            # No loop-carry needed — same range_constexpr unroll.
-            b_tiles = []
-            for n_sub in range_constexpr(_N_SUB):
-                w_dword_off = w_row_dword_bases[n_sub] + k_dword_lane + k_dword_off
-                w_lo = buffer_ops.buffer_load(
-                    w_rsrc, w_dword_off, vec_width=4, dtype=T.i32)
-                w_hi = buffer_ops.buffer_load(
-                    w_rsrc, w_dword_off + fx.Index(4), vec_width=4, dtype=T.i32)
-                b128 = vector.from_elements(
-                    v8i32,
-                    [w_lo[0], w_lo[1], w_lo[2], w_lo[3],
-                     w_hi[0], w_hi[1], w_hi[2], w_hi[3]],
-                )
-                b_tiles.append(b128)
+            # ---------- W load co-issued with A DMA ----------
+            # 32x32x64 MFMA: per N-block, per krep (2 K-halves of 64) the lane
+            # loads its 32 B-bytes = B[w_row, krep*64 + (l//32)*32 + 0..31].
+            # b_tiles[nb][krep] is a v8i32.
+            b_tiles = [[None] * _KREP for _ in range_constexpr(_N_SUB32)]
+            for nb in range_constexpr(_N_SUB32):
+                for krep in range_constexpr(_KREP):
+                    w_dword_off = (w_row_dword_bases[nb] + k_dword_off
+                                   + fx.Index(krep * 16) + k_dword_lane)
+                    w_lo = buffer_ops.buffer_load(
+                        w_rsrc, w_dword_off, vec_width=4, dtype=T.i32)
+                    w_hi = buffer_ops.buffer_load(
+                        w_rsrc, w_dword_off + fx.Index(4), vec_width=4, dtype=T.i32)
+                    b_tiles[nb][krep] = vector.from_elements(
+                        v8i32,
+                        [w_lo[0], w_lo[1], w_lo[2], w_lo[3],
+                         w_hi[0], w_hi[1], w_hi[2], w_hi[3]],
+                    )
 
             gpu.barrier()
 
-            # ---------- W_scale (Phase 4a: from LDS) ----------
-            # All 4 waves cover one 128-N block, so single byte covers all.
-            # Pre-loaded into LDS in prologue; here we just read 1 byte.
+            # ---------- W_scale (from LDS) ----------
             w_scale_byte = ws_scale_lds[fx.Index(k_tile)]
             w_scale_packed = _ue8m0_byte_pack4(w_scale_byte)
 
-            # ---------- A from LDS (per-wave, per-lane) + A_scale + MFMA ----------
-            # All 4 waves read the SAME A region from LDS (different waves do
-            # the same M MFMAs but with different N stripes of W).
-            for m_sub in range_constexpr(_M_SUB):
-                # Load A from LDS: lane l reads A[m_sub*16 + l%16, k_byte_in_lane..+32].
-                # Phase 2: split into 2x 16-byte reads, each XOR-swizzled, then
-                # reassemble. The swizzle works at 16-byte granularity so a single
-                # 32-byte read would get the two halves in possibly-swapped order.
-                a_lds_row = fx.Index(m_sub * 16) + row
-                swz_lo = _swizzle_xor16(a_lds_row, k_byte_in_lane)
-                swz_hi = _swizzle_xor16(a_lds_row, k_byte_in_lane + fx.Index(16))
-                half_lo_b = as_lds.vec_load((a_lds_row, swz_lo), 16)
-                half_hi_b = as_lds.vec_load((a_lds_row, swz_hi), 16)
-                half_lo = vector.bitcast(v4i32_t, half_lo_b)
-                half_hi = vector.bitcast(v4i32_t, half_hi_b)
-                a128 = vector.from_elements(
-                    v8i32,
-                    [half_lo[0], half_lo[1], half_lo[2], half_lo[3],
-                     half_hi[0], half_hi[1], half_hi[2], half_hi[3]],
-                )
-
-                # A_scale (Phase 4a: from LDS).
-                # local_m_row = m_sub*16 + (lane%16), in [0, 128).
-                # Pre-loaded into LDS in prologue; here we just read 1 byte
-                # per (m_sub, lane). 4 lanes covering one M-row read same
-                # byte → LDS broadcast (no bank conflict).
-                local_m_row = fx.Index(m_sub * 16) + row
+            # ---------- A from LDS + A_scale + MFMA (32x32x64, KRepeat=2) ----------
+            for mb in range_constexpr(_M_SUB32):
+                # A_scale: per M-block M-row = mb*32 + (l%32); one byte per K-iter
+                # (same byte for both kreps within the 128-K block).
+                local_m_row = fx.Index(mb * 32) + row32
                 a_scale_byte = as_scale_lds[local_m_row, fx.Index(k_tile)]
                 a_scale_packed = _ue8m0_byte_pack4(a_scale_byte)
 
-                for n_sub in range_constexpr(_N_SUB):
-                    tile_acc = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                        T.f32x4,
-                        [a128, b_tiles[n_sub], fx.Vector.filled(4, 0.0, fx.Float32),
-                         0, 0, 0, a_scale_packed, 0, w_scale_packed],
+                # Load A from LDS for both kreps: lane reads
+                #   A[mb*32 + (l%32), krep*64 + (l//32)*32 + 0..31] = 32 bytes.
+                a_tiles = [None] * _KREP
+                for krep in range_constexpr(_KREP):
+                    a_lds_row = fx.Index(mb * 32) + row32
+                    col_byte = fx.Index(krep * 64) + k_byte_in_lane
+                    swz_lo = _swizzle_xor16(a_lds_row, col_byte)
+                    swz_hi = _swizzle_xor16(a_lds_row, col_byte + fx.Index(16))
+                    half_lo_b = as_lds.vec_load((a_lds_row, swz_lo), 16)
+                    half_hi_b = as_lds.vec_load((a_lds_row, swz_hi), 16)
+                    half_lo = vector.bitcast(v4i32_t, half_lo_b)
+                    half_hi = vector.bitcast(v4i32_t, half_hi_b)
+                    a_tiles[krep] = vector.from_elements(
+                        v8i32,
+                        [half_lo[0], half_lo[1], half_lo[2], half_lo[3],
+                         half_hi[0], half_hi[1], half_hi[2], half_hi[3]],
                     )
-                    new_vals = []
-                    for i in range_constexpr(4):
-                        new_vals.append(accs[m_sub][n_sub][i] + tile_acc[i])
-                    accs[m_sub][n_sub] = vector.from_elements(v4f32, new_vals)
+
+                for nb in range_constexpr(_N_SUB32):
+                    acc = accs[mb][nb]
+                    for krep in range_constexpr(_KREP):
+                        acc = _mfma_scale_32x32x64(
+                            v16f32,
+                            a_tiles[krep], b_tiles[nb][krep], acc,
+                            a_scale_packed, w_scale_packed,
+                        )
+                    accs[mb][nb] = acc
+
+            # ---- Optional sched hints (empirical; bench decides) ----
+            # _N_MFMA mfmas, _N_DSRD main A ds_reads, _N_VMEM global loads/iter.
+            if sched_hint == 1:
+                # Single fence: let LLVM re-pack the region between barriers.
+                rocdl.sched_barrier(0)
+            elif sched_hint == 2:
+                # Interleave: hoist vmem, then pair ds_reads with mfmas.
+                _NM = _M_SUB32 * _N_SUB32 * _KREP
+                _ND = _M_SUB32 * _KREP * 2
+                _NV = _A_DMA_CHUNKS + _N_SUB32 * _KREP * 2
+                _d_per = max(1, _ND // _NM)
+                rocdl.sched_barrier(0)
+                rocdl.sched_vmem(_NV)
+                for _j in range_constexpr(_NM):
+                    rocdl.sched_dsrd(_d_per)
+                    rocdl.sched_mfma(1)
+                rocdl.sched_barrier(0)
 
             # Phase 5b: in coop mode the barrier waits for DMA[k+1] (issued
             # at iter start) to complete + wave sync. In solo modes (legacy)
@@ -632,18 +666,20 @@ def compile_bgfp8bw_v2_kernel(B: int, M: int, N: int, K: int,
             gpu.barrier()
 
         # ====================================================================
-        # Output store: each wave writes its 128M x 32N sub-tile direct to HBM.
-        # Per lane: M_SUB (8) x N_SUB (2) x 4 rows = 64 bf16 elements.
+        # Output store: 32x32x64 C layout. lane l writes 16 f32:
+        #   col(n) = l % 32; reg i -> row(m) = (i//4)*8 + (l//32)*4 + (i%4).
         # ====================================================================
-        out_col = lane % fx.Index(16)
-        for m_sub in range_constexpr(_M_SUB):
-            for n_sub in range_constexpr(_N_SUB):
-                for i in range_constexpr(4):
-                    m_idx = (pid_m * fx.Index(_BLOCK_M)
-                             + fx.Index(m_sub * 16) + out_row_base + fx.Index(i))
-                    n_idx = (pid_n * fx.Index(_BLOCK_N) + wave_n_offset
-                             + fx.Index(n_sub * 16) + out_col)
-                    bf16_val = _truncf_f32_to_bf16(accs[m_sub][n_sub][i])
+        out_col = lane % fx.Index(32)
+        out_row_grp = (lane // fx.Index(32)) * fx.Index(4)   # 0 or 4
+        for mb in range_constexpr(_M_SUB32):
+            for nb in range_constexpr(_N_SUB32):
+                n_idx = (pid_n * fx.Index(_BLOCK_N) + wave_n_offset
+                         + fx.Index(nb * 32) + out_col)
+                for i in range_constexpr(16):
+                    m_idx = (pid_m * fx.Index(_BLOCK_M) + fx.Index(mb * 32)
+                             + fx.Index((i // 4) * 8) + out_row_grp
+                             + fx.Index(i % 4))
+                    bf16_val = _truncf_f32_to_bf16(accs[mb][nb][i])
                     Out_[pid_b, m_idx, n_idx] = bf16_val
 
     @flyc.jit
@@ -660,7 +696,7 @@ def compile_bgfp8bw_v2_kernel(B: int, M: int, N: int, K: int,
     return launcher
 
 
-def flydsl_batched_gemm_fp8_blockwise_v2(
+def flydsl_batched_gemm_fp8_blockwise_m32(
     A: torch.Tensor,
     W: torch.Tensor,
     A_scale: torch.Tensor,
@@ -670,11 +706,12 @@ def flydsl_batched_gemm_fp8_blockwise_v2(
     block_m: int = 128,
     block_n: int = 128,
     n_waves: int = 4,
+    sched_hint: int = 0,
 ) -> torch.Tensor:
     """v2 wrapper. Constraints: M % block_m == 0, N % block_n == 0, K % 128 == 0.
 
     block_m / block_n / n_waves: per-WG tile geometry (see
-    compile_bgfp8bw_v2_kernel). Defaults reproduce the original 128x128/4-wave
+    compile_bgfp8bw_m32_kernel). Defaults reproduce the original 128x128/4-wave
     layout; pass other values for per-shape tile autotuning.
 
     load_mode: HBM->LDS A load strategy. One of:
@@ -699,9 +736,10 @@ def flydsl_batched_gemm_fp8_blockwise_v2(
     if out is None:
         out = torch.empty((B, M, N), dtype=torch.bfloat16, device=A.device)
 
-    launcher = compile_bgfp8bw_v2_kernel(
+    launcher = compile_bgfp8bw_m32_kernel(
         B, M, N, K, load_mode=load_mode,
-        block_m=block_m, block_n=block_n, n_waves=n_waves)
+        block_m=block_m, block_n=block_n, n_waves=n_waves,
+        sched_hint=sched_hint)
     cf = getattr(launcher, "_aiter_cf", None)
     if cf is None:
         cf = flyc.compile(launcher, A, W, A_scale, W_scale, out)

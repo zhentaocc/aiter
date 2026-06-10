@@ -2536,6 +2536,160 @@ input dtype. A 4× discrepancy with prior bench data is a smell.
 
 ---
 
+### Iter 12 — v2 tile autotune (block_m / block_n / n_waves) — *default already optimal*
+
+**Motivation**: CK autotunes its tile size per shape (one of the three
+sources of its lead per the Iter 8 deep-dive). v2 had only ever run the
+fixed 128x128 / 4-wave geometry. Question: does sweeping the WG tile
+shape close any of the CK gap?
+
+**Change**: parameterized `compile_bgfp8bw_v2_kernel` /
+`flydsl_batched_gemm_fp8_blockwise_v2` to accept `block_m`, `block_n`,
+`n_waves` (BLOCK_K stays 128 = MFMA-K = scale-block). Generalizations:
+cooperative A-DMA chunk count `= block_m/(n_waves*8)` with row stride
+`chunk*(n_waves*8)`; A_scale prologue now loops `ceil(block_m*K_g /
+(block_threads*16))` rounds with a partial-round thread guard (the old
+code hardcoded one 256-thread 4 KB round → wrong for any other geometry);
+W_scale `n_block_idx = (pid_n*block_n)//128`. Defaults reproduce the
+original codegen exactly.
+
+**Correctness**: all valid geometries max-err 0.5 vs torch oracle;
+`block_n>128` correctly rejected (would need 2 W_scale bytes/iter).
+
+**Tuner**: 14 valid configs/shape (block_m∈{64,128,256}, block_n∈{64,128},
+n_waves∈{2,4,8}, filtered by divisibility + a crude acc-VGPR<=160 guard).
+Run on an **idle** gfx950 node (the dev host's 8 GPUs were 100% busy with
+other tenants — contention inflated v2 to 650 us, so all tile-tune
+numbers were taken on smci355-...-n02-09 with flydsl 0.1.3.1).
+
+**Results** (CUDA-event median, idle node):
+
+| shape | best geom | best us | best TF | default(128x128x4) us |
+|---|---|---|---|---|
+| (8,1024,1024,4096) | 128x128x**8** | 328 | 209 | 329 |
+| (8,4096,1024,4096) | **128x128x4** | 494 | 557 | 494 |
+| (8,8192,1024,4096) | **128x128x4** | 710 | 775 | 710 |
+
+These clean numbers match the Iter 8 v2 figures (508/729 us) within 3%,
+confirming the harness. **Tile autotune gives ~0%**: the default 128x128x4
+is already the optimum at M>=4096; at M=1024 n_waves=8 edges ahead by
+1 us (noise). Other geometries (narrow 64-M tiles, n_waves=2, 256-M
+tiles) are all 3-50% slower — bigger tiles spill, smaller tiles
+under-amortize K-loop overhead (same lesson as Iter 4).
+
+**Conclusion**: tile geometry is **not** a source of the CK gap for these
+shapes — v2 was already sitting on the best tile. The remaining ~1.6-1.9x
+gap to CK (v2 494 vs CK ~264 @ M=4096; v2 710 vs CK ~436 @ M=8192) is
+confirmed structural: Intrawave-v3 K-loop scheduling + CShuffle epilogue
+(Iter 8-10), neither reachable without a FlyDSL `sched_group_barrier`
+primitive. Next untried lever: the **32x32x64 fp8 MFMA** (CK's MFMA shape;
+v2 uses 16x16x128) — changes issue-rate amortization, orthogonal to tile
+size.
+
+**Files**: `batched_gemm_fp8_blockwise_flydsl_v2.py` gains the geometry
+params (backward-compatible). Tuner lives in `_tune_geom.py` (dev scratch,
+not committed).
+
+---
+
+### Iter 13 — m32 kernel: 32x32x64 fp8 MFMA — *6-8% win over v2*
+
+**Motivation**: v2 (and every prior variant) used the `16x16x128` scaled
+fp8 MFMA. CK kid=0 uses `32x32x64`. A 32x32x64 MFMA does **2x the MACs
+per instruction** (32*32*64 vs 16*16*128 = 65536 vs 32768), so the same
+total work needs **half the MFMA instructions** → better issue-rate
+amortization (the Iter-4 bottleneck). Orthogonal to tile size (Iter 12).
+
+**New kernel** `batched_gemm_fp8_blockwise_flydsl_m32.py` (copy of v2 with
+the compute core swapped). Same LDS layout, cooperative A-DMA, scale
+prologue, XOR-swizzle. Changes:
+- MFMA `mfma_scale_f32_32x32x64_f8f6f4`. flydsl 0.1.3.1 ships **no**
+  functional wrapper for it (only the 16x16x128 one), so `_mfma_scale_32x32x64`
+  calls the raw rocdl OpView and unwraps operands via
+  `rocdl._unwrap_mfma_operand`, returns `.result`. Accumulate by **chaining
+  the `c` operand** across KRepeat (cleaner than v2's manual element add).
+- Geometry: per wave M_SUB32=block_m/32 32-row M-blocks, N_SUB32=
+  (block_n/n_waves)/32 32-col N-blocks, **KRepeat=2** (128-K iter = two
+  64-K MFMA steps, same accumulator, same 128-K scale byte).
+- Lane mapping (CDNA4, verified correct first try):
+  - A/B operand: `row = l%32`, `kgroup = l//32` → lane holds 32 K-bytes
+    `[kgroup*32 + 0..31]` (v8i32).
+  - C accumulator (v16f32/lane): `col = l%32`; reg `i` → `row =
+    (i//4)*8 + (l//32)*4 + (i%4)`.
+- Acc VGPR: M_SUB32*N_SUB32*16 = 64 f32 at 128x128x4 (same as v2's
+  8*2*4=64) — no occupancy hit.
+
+**Correctness**: max-err 0.5 / mean 2e-4 vs torch oracle on first compile,
+across 128x128x4 / 64x128x4 / 128x128x2 (block_n/n_waves must be a
+multiple of 32). The derived mappings + `_ue8m0_byte_pack4` scale (×4
+replicate; the MFMA reads the 2 sub-block bytes it needs) were all right.
+
+**Performance** (idle node, m32 geometry swept):
+
+| shape | v2 best | m32 best | m32 geom | m32 TF | m32/v2 |
+|---|---|---|---|---|---|
+| (8,1024,1024,4096) | 338.6 | **318.7** | 128x128x4 | 216 | 0.94x |
+| (8,4096,1024,4096) | 484.6 | **445.0** | 256x128x4 | 618 | 0.92x |
+| (8,8192,1024,4096) | 694.6 | **655.4** | 256x128x4 | 839 | 0.94x |
+
+**6-8% faster than v2** — the first real gain since Iter 8 Phase 4b. The
+bigger 256-M tile wins at M>=4096 (32x32 MFMA keeps acc-VGPR low even at
+M_SUB32=8 → 128 acc regs, still no spill). Gap to CK narrows:
+- @4096: 1.87x → **1.69x** (m32 618 vs CK ~1043 TF)
+- @8192: 1.63x → **1.50x** (m32 839 vs CK ~1260 TF)
+
+**Takeaway**: MFMA shape matters — half the instruction count buys ~7%.
+But the bulk of CK's lead is still the Intrawave-v3 scheduler + CShuffle
+(Iter 8-10). Next: apply the m32 compute core under profiling-driven
+`sched_*` interleaving (the ~25% lever), now that the instruction stream
+is shorter (32 MFMAs/WG/iter vs 64) and may schedule more cleanly.
+
+**Files**: `batched_gemm_fp8_blockwise_flydsl_m32.py` (new). Bench
+`_bench_m32.py`, test `_test_m32.py` (dev scratch).
+
+---
+
+### Iter 14 — m32 + sched_* hints — *flat to -3%, reverted (default off)*
+
+**Motivation**: the m32 instruction stream is half v2's (32 MFMAs/WG/iter
+vs 64), so it might schedule more cleanly under explicit `sched_*` hints —
+the ~25% lever (CK's HotLoopScheduler). **Update to a prior journey claim**:
+flydsl 0.1.3.1 *does* expose `rocdl.sched_group_barrier(mask, size, group)`
+(the exact CK primitive) plus `sched_mfma/dsrd/vmem/barrier`; a working
+reference exists in `mixed_moe_gemm_2stage.py:_sched_hints_stage1_gate_up`.
+
+**Tried** (m32, `sched_hint` param): (1) a single `sched_barrier(0)` fence
+per K-iter; (2) interleave `sched_vmem(NV); for NM: sched_dsrd(2); sched_mfma(1)`.
+
+**Result** (idle node, best m32 geom per shape):
+
+| shape | hint=0 | hint=1 (fence) | hint=2 (interleave) |
+|---|---|---|---|
+| (8,1024,...) | 335 | 334 | 332 |
+| (8,4096,...) | **467** | 480 | 475 |
+| (8,8192,...) | **668** | 678 | 680 |
+
+**Flat at M=1024, -2 to -3% at M>=4096** — same outcome as Iter 8 Phase 3a.
+The coarse `sched_mfma/dsrd/vmem` group hints over-constrain LLVM (and miss
+the scale ds_reads in the count → nop risk), and the default scheduler is
+already good. The *precise* CK approach needs a per-instruction
+`sched_group_barrier` table with correct masks, matched against the real
+ISA — but flydsl 0.1.3.1's ASM dump (`FLYDSL_DEBUG_DUMP_ASM`) doesn't emit
+in this env, so the instruction accounting needed to craft a nop-free table
+isn't available. Building that table is the "weeks of work" the Iter 8
+deep-dive predicted.
+
+**Decision**: `sched_hint` defaults to 0 (off); production m32 unaffected.
+The hint code stays in-tree (dormant) for future ISA-driven tuning.
+
+**Net of the two structural levers this round**: tile autotune ~0% (Iter 12),
+32x32x64 MFMA **+6-8%** (Iter 13), sched hints regress (Iter 14). The m32
+MFMA is the keeper — CK gap now **1.69x @ M=4096, 1.50x @ M=8192** (was
+1.87x / 1.63x). Remaining gap is the v3-scheduler + CShuffle pair, still
+gated on ISA-dump tooling + sched_group_barrier table work.
+
+---
+
 ## 3. Diagnostic methodology cheat sheet
 
 ### Spill / VGPR check (the *first* thing to try if perf disappoints)

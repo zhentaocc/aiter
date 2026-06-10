@@ -593,18 +593,21 @@ def flydsl_batched_gemm_fp8_blockwise(
     assert M % 16 == 0
     assert N % 128 == 0
 
-    # Dispatch to v2 (4 waves/WG + LDS-A + 128x128 tile) for prefill shapes.
-    # v2 needs M % 128 and N % 128. Decode (M < 128 or M not div 128) stays
-    # on the single-wave kernel below. See OPTIMIZATION_JOURNEY.md Iter 8.
+    # Dispatch to m32 (4 waves/WG + LDS-A + 32x32x64 fp8 MFMA) for prefill
+    # shapes -- m32 is ~6-8% faster than the older 16x16x128 v2 (journey
+    # Iter 13). Needs M % 128 and N % 128. Decode (M < 128 or M not div 128)
+    # stays on the single-wave kernel below. See OPTIMIZATION_JOURNEY.md.
     if (block_m is None and block_n is None
             and M >= 128 and M % _BLOCK_M_V2 == 0 and N % _BLOCK_N_V2 == 0):
-        from .batched_gemm_fp8_blockwise_flydsl_v2 import (
-            flydsl_batched_gemm_fp8_blockwise_v2 as _v2,
+        from .batched_gemm_fp8_blockwise_flydsl_m32 import (
+            flydsl_batched_gemm_fp8_blockwise_m32 as _m32,
         )
-        # v2's wrapper expects already-converted scales (uint8) -- but our
-        # _torch_scales_to_ue8m0 above is idempotent if the scale is already
-        # uint8, so pass through is safe.
-        return _v2(A, W, A_scale, W_scale, out=out)
+        # Benchmarked-best geometry (journey Iter 13): BM=256 wins for large
+        # prefill (M >= 2048 & divisible), BM=128 for smaller M. BN=128, 4 waves.
+        # Scales already UE8M0 (idempotent).
+        bm = 256 if (M >= 2048 and M % 256 == 0) else 128
+        return _m32(A, W, A_scale, W_scale, out=out,
+                    block_m=bm, block_n=128, n_waves=4)
     BLOCK_M = block_m if block_m is not None else _pick_block_m(M)
     BLOCK_N = block_n if block_n is not None else _pick_block_n(M, N)
     assert M % BLOCK_M == 0, f"M={M} must divide BLOCK_M={BLOCK_M}"
