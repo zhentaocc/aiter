@@ -45,6 +45,12 @@ EXPECTED = [
         False,
     ),
     (
+        "module_batched_gemm_a8w8_blockscale_tune",
+        "csrc/ck_batched_gemm_a8w8_blockscale/batched_gemm_a8w8_blockscale_tune.py",
+        "AITER_CONFIG_A8W8_BLOCKSCALE_BATCHED_GEMM_FILE",
+        False,
+    ),
+    (
         "module_batched_gemm_bf16_tune",
         "csrc/ck_batched_gemm_bf16/batched_gemm_bf16_tune.py",
         "AITER_CONFIG_BF16_BATCHED_GEMM_FILE",
