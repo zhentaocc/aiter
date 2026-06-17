@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import itertools
-import time
 from pathlib import Path
 
 import torch
@@ -81,6 +80,38 @@ def _make_inputs(B, M, N, K, *, seed=0):
 # Per-shape bench.
 # -----------------------------------------------------------------------------
 
+def _cuda_event_us(fn, *, warmup, iters):
+    """Pure-GPU latency samples (us) via CUDA events.
+
+    Each sample brackets a single kernel launch with start/end events on the
+    stream, so only GPU execution time is measured -- CPU launch / Python
+    dispatch overhead between iterations is excluded (events sit on the GPU
+    timeline). Returns the sorted list of per-iteration microseconds.
+    """
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    samples = []
+    for _ in range(iters):
+        start.record()
+        fn()
+        end.record()
+        torch.cuda.synchronize()
+        samples.append(start.elapsed_time(end) * 1e3)  # ms -> us
+    samples.sort()
+    return samples
+
+
+def _pcts(samples):
+    return (
+        samples[len(samples) // 2],                              # p50
+        samples[max(0, int(len(samples) * 0.20) - 1)],          # p20
+        samples[min(len(samples) - 1, int(len(samples) * 0.80))],  # p80
+    )
+
+
 def bench_one(B, M, N, K, *, warmup, rep, accuracy):
     A, W, A_scale, W_scale = _make_inputs(B, M, N, K, seed=B * 10007 + M * 101 + N + K)
     Y = torch.empty((B, M, N), dtype=torch.bfloat16, device=DEVICE)
@@ -95,26 +126,20 @@ def bench_one(B, M, N, K, *, warmup, rep, accuracy):
         max_err = diff.max().item()
         rel_err = max_err / max(ref.float().abs().max().item(), 1e-6)
 
-    # CK kernel timing. Same method as the tune driver
-    # (batched_gemm_fp8_blockscale_tune.py): per-call wall clock with a
-    # cuda.synchronize() after each launch, then take percentiles of the
-    # samples. This matches the ``us`` column in the tuned CSV (includes the
-    # per-call launch/sync overhead), unlike triton.do_bench which amortises
-    # it across batched launches.
-    fn = lambda: aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out=Y)
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    samples = []
-    for _ in range(rep):
-        t0 = time.perf_counter_ns()
-        fn()
-        torch.cuda.synchronize()
-        samples.append((time.perf_counter_ns() - t0) / 1e3)  # us
-    samples.sort()
-    us = samples[len(samples) // 2]                       # median (p50)
-    p20 = samples[max(0, int(len(samples) * 0.20) - 1)]
-    p80 = samples[min(len(samples) - 1, int(len(samples) * 0.80))]
+    # CK kernel timing (pure GPU time via CUDA events).
+    ck = _cuda_event_us(
+        lambda: aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out=Y),
+        warmup=warmup, iters=rep)
+    us, p20, p80 = _pcts(ck)
+
+    # Torch dequant + bf16 bmm reference, timed the same way (fewer iters --
+    # it's much slower). Median only.
+    torch_iters = max(3, rep // 4)
+    torch_samples = _cuda_event_us(
+        lambda: _torch_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale),
+        warmup=2, iters=torch_iters)
+    torch_us = torch_samples[len(torch_samples) // 2]
+    speedup = torch_us / us if us > 0 else float("nan")
 
     flops = 2.0 * B * M * N * K
     tflops = flops / (us * 1e-6) / 1e12
@@ -127,6 +152,7 @@ def bench_one(B, M, N, K, *, warmup, rep, accuracy):
     return {
         "B": B, "M": M, "N": N, "K": K,
         "median_us": us, "p20_us": p20, "p80_us": p80,
+        "torch_us": torch_us, "speedup": speedup,
         "tflops": tflops, "bw_gb_s": bw_gb_s,
         "max_err": max_err, "rel_err": rel_err,
     }
@@ -142,9 +168,9 @@ def run_single_benchmark(args):
     r = bench_one(B, M, N, K, warmup=args.warmup, rep=args.rep,
                   accuracy=not args.no_accuracy)
     print("Results:")
-    print(f"  Median latency: {r['median_us']:.2f} us")
-    print(f"  P20 latency:    {r['p20_us']:.2f} us")
-    print(f"  P80 latency:    {r['p80_us']:.2f} us")
+    print(f"  CK median:      {r['median_us']:.2f} us  (p20={r['p20_us']:.2f}, p80={r['p80_us']:.2f})")
+    print(f"  Torch ref:      {r['torch_us']:.2f} us")
+    print(f"  Speedup:        {r['speedup']:.2f}x")
     print(f"  Throughput:     {r['tflops']:.2f} TFLOP/s")
     print(f"  Bandwidth:      {r['bw_gb_s']:.2f} GB/s")
     if not args.no_accuracy:
@@ -168,7 +194,7 @@ def run_sweep_benchmark(args):
           f"(preset={args.preset or 'custom'})\n")
 
     header = (f"{'B':>4} {'M':>5} {'N':>5} {'K':>5} "
-              f"{'median_us':>10} {'p20_us':>9} {'p80_us':>9} "
+              f"{'ck_us':>9} {'p20':>8} {'p80':>8} {'torch_us':>9} {'speedup':>8} "
               f"{'TFLOPS':>7} {'GB/s':>7} {'max_err':>9} {'rel_err':>9}")
     print(header)
     print("-" * len(header))
@@ -183,7 +209,8 @@ def run_sweep_benchmark(args):
             continue
         results.append(r)
         print(f"{B:>4} {M:>5} {N:>5} {K:>5} "
-              f"{r['median_us']:>10.2f} {r['p20_us']:>9.2f} {r['p80_us']:>9.2f} "
+              f"{r['median_us']:>9.2f} {r['p20_us']:>8.2f} {r['p80_us']:>8.2f} "
+              f"{r['torch_us']:>9.2f} {r['speedup']:>7.2f}x "
               f"{r['tflops']:>7.1f} {r['bw_gb_s']:>7.1f} "
               f"{r['max_err']:>9.4f} {r['rel_err']:>9.4f}")
 
@@ -195,10 +222,11 @@ def run_sweep_benchmark(args):
 def _save_results_csv(filepath, results):
     path = Path(filepath)
     with open(path, "w") as f:
-        f.write("B,M,N,K,median_us,p20_us,p80_us,tflops,bw_gb_s,max_err,rel_err\n")
+        f.write("B,M,N,K,median_us,p20_us,p80_us,torch_us,speedup,tflops,bw_gb_s,max_err,rel_err\n")
         for r in results:
             f.write(f"{r['B']},{r['M']},{r['N']},{r['K']},"
                     f"{r['median_us']:.3f},{r['p20_us']:.3f},{r['p80_us']:.3f},"
+                    f"{r['torch_us']:.3f},{r['speedup']:.4f},"
                     f"{r['tflops']:.4f},{r['bw_gb_s']:.4f},"
                     f"{r['max_err']:.6f},{r['rel_err']:.6f}\n")
     print(f"Results saved to {path.resolve()}")
