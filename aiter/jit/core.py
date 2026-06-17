@@ -128,6 +128,11 @@ AITER_CONFIG_BF16_BATCHED_GEMM = os.getenv(
     f"{AITER_ROOT_DIR}/aiter/configs/bf16_tuned_batched_gemm.csv",
 )
 
+AITER_CONFIG_FP8_BLOCKWISE_BATCHED_GEMM = os.getenv(
+    "AITER_CONFIG_FP8_BLOCKWISE_BATCHED_GEMM",
+    f"{AITER_ROOT_DIR}/aiter/configs/fp8_blockwise_tuned_batched_gemm.csv",
+)
+
 AITER_CONFIG_GEMM_BF16 = os.getenv(
     "AITER_CONFIG_GEMM_BF16",
     f"{AITER_ROOT_DIR}/aiter/configs/bf16_tuned_gemm.csv",
@@ -201,6 +206,14 @@ class AITER_CONFIG(object):
             "AITER_CONFIG_BF16_BATCHED_GEMM",
             AITER_CONFIG_BF16_BATCHED_GEMM,
             "bf16_tuned_batched_gemm",
+        )
+
+    @property
+    def AITER_CONFIG_FP8_BLOCKWISE_BATCHED_GEMM_FILE(self):
+        return self.get_config_file(
+            "AITER_CONFIG_FP8_BLOCKWISE_BATCHED_GEMM",
+            AITER_CONFIG_FP8_BLOCKWISE_BATCHED_GEMM,
+            "fp8_blockwise_tuned_batched_gemm",
         )
 
     @property
