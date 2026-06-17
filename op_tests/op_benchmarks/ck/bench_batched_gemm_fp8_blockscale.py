@@ -95,22 +95,23 @@ def bench_one(B, M, N, K, *, warmup, rep, accuracy):
         max_err = diff.max().item()
         rel_err = max_err / max(ref.float().abs().max().item(), 1e-6)
 
-    # CK kernel timing.
+    # CK kernel timing. do_bench returns milliseconds; convert to microseconds.
     fn = lambda: aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out=Y)
-    ms, p20, p80 = triton.testing.do_bench(
+    ms, p20_ms, p80_ms = triton.testing.do_bench(
         fn, warmup=warmup, rep=rep, quantiles=[0.5, 0.2, 0.8])
+    us, p20, p80 = ms * 1e3, p20_ms * 1e3, p80_ms * 1e3
 
     flops = 2.0 * B * M * N * K
-    tflops = flops / ms * 1e-9
+    tflops = flops / (us * 1e-6) / 1e12
     bytes_io = (A.numel() * A.element_size() + W.numel() * W.element_size() +
                 A_scale.numel() * A_scale.element_size() +
                 W_scale.numel() * W_scale.element_size() +
                 Y.numel() * Y.element_size())
-    bw_gb_s = bytes_io / (ms * 1e-3) * 1e-9
+    bw_gb_s = bytes_io / (us * 1e-6) / 1e9
 
     return {
         "B": B, "M": M, "N": N, "K": K,
-        "median_ms": ms, "p20_ms": p20, "p80_ms": p80,
+        "median_us": us, "p20_us": p20, "p80_us": p80,
         "tflops": tflops, "bw_gb_s": bw_gb_s,
         "max_err": max_err, "rel_err": rel_err,
     }
@@ -126,9 +127,9 @@ def run_single_benchmark(args):
     r = bench_one(B, M, N, K, warmup=args.warmup, rep=args.rep,
                   accuracy=not args.no_accuracy)
     print("Results:")
-    print(f"  Median latency: {r['median_ms']:.4f} ms")
-    print(f"  P20 latency:    {r['p20_ms']:.4f} ms")
-    print(f"  P80 latency:    {r['p80_ms']:.4f} ms")
+    print(f"  Median latency: {r['median_us']:.2f} us")
+    print(f"  P20 latency:    {r['p20_us']:.2f} us")
+    print(f"  P80 latency:    {r['p80_us']:.2f} us")
     print(f"  Throughput:     {r['tflops']:.2f} TFLOP/s")
     print(f"  Bandwidth:      {r['bw_gb_s']:.2f} GB/s")
     if not args.no_accuracy:
@@ -152,7 +153,7 @@ def run_sweep_benchmark(args):
           f"(preset={args.preset or 'custom'})\n")
 
     header = (f"{'B':>4} {'M':>5} {'N':>5} {'K':>5} "
-              f"{'median_ms':>10} {'p20_ms':>9} {'p80_ms':>9} "
+              f"{'median_us':>10} {'p20_us':>9} {'p80_us':>9} "
               f"{'TFLOPS':>7} {'GB/s':>7} {'max_err':>9} {'rel_err':>9}")
     print(header)
     print("-" * len(header))
@@ -167,7 +168,7 @@ def run_sweep_benchmark(args):
             continue
         results.append(r)
         print(f"{B:>4} {M:>5} {N:>5} {K:>5} "
-              f"{r['median_ms']:>10.4f} {r['p20_ms']:>9.4f} {r['p80_ms']:>9.4f} "
+              f"{r['median_us']:>10.2f} {r['p20_us']:>9.2f} {r['p80_us']:>9.2f} "
               f"{r['tflops']:>7.1f} {r['bw_gb_s']:>7.1f} "
               f"{r['max_err']:>9.4f} {r['rel_err']:>9.4f}")
 
@@ -179,10 +180,10 @@ def run_sweep_benchmark(args):
 def _save_results_csv(filepath, results):
     path = Path(filepath)
     with open(path, "w") as f:
-        f.write("B,M,N,K,median_ms,p20_ms,p80_ms,tflops,bw_gb_s,max_err,rel_err\n")
+        f.write("B,M,N,K,median_us,p20_us,p80_us,tflops,bw_gb_s,max_err,rel_err\n")
         for r in results:
             f.write(f"{r['B']},{r['M']},{r['N']},{r['K']},"
-                    f"{r['median_ms']:.6f},{r['p20_ms']:.6f},{r['p80_ms']:.6f},"
+                    f"{r['median_us']:.3f},{r['p20_us']:.3f},{r['p80_us']:.3f},"
                     f"{r['tflops']:.4f},{r['bw_gb_s']:.4f},"
                     f"{r['max_err']:.6f},{r['rel_err']:.6f}\n")
     print(f"Results saved to {path.resolve()}")

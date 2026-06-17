@@ -139,12 +139,6 @@ def batched_gemm_fp8_blockscale(
     """
     _, M, K = A.shape
     N = W.shape[1]
-    if M < 128 or M % 128 != 0 or N % 128 != 0 or K % 128 != 0:
-        raise ValueError(
-            f"batched_gemm_fp8_blockscale: unsupported shape "
-            f"(B={A.shape[0]}, M={M}, N={N}, K={K}); requires M>=128 and "
-            f"M%128==N%128==K%128==0."
-        )
     if A_scale.dtype != W_scale.dtype:
         raise ValueError(
             f"batched_gemm_fp8_blockscale: A_scale.dtype ({A_scale.dtype}) "

@@ -137,13 +137,15 @@ def test_batched_gemm_fp8_blockscale_correctness(B, M, N, K):
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
 
 
-def test_unsupported_shape_raises():
-    """Shapes outside (M>=128, M%128==N%128==K%128==0) must raise ValueError."""
+def test_scale_dtype_mismatch_raises():
+    """A_scale and W_scale must share dtype."""
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA/HIP device")
-    A, W, A_scale, W_scale = _make_inputs(2, 64, 256, 128, seed=0)  # M=64 < 128
-    with pytest.raises(ValueError, match="unsupported shape"):
-        aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
+    A, W, A_scale, W_scale = _make_inputs(2, 128, 256, 128, seed=0)
+    W_scale_u8 = W_scale.to(torch.float32)  # ensure fp32
+    A_scale_u8 = (A_scale * 0 + 127).to(torch.uint8)  # u8
+    with pytest.raises(ValueError, match="must match"):
+        aiter.batched_gemm_fp8_blockscale(A, W, A_scale_u8, W_scale_u8)
 
 
 if __name__ == "__main__":
