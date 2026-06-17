@@ -97,6 +97,7 @@ if [[ "$TEST_TYPE" == "aiter" ]]; then
     FILE_TIMES[op_tests/test_batched_gemm_bf16.py]=32
     FILE_TIMES[op_tests/test_mhc.py]=30
     FILE_TIMES[op_tests/test_batched_gemm_a8w8.py]=28
+    FILE_TIMES[op_tests/test_batched_gemm_fp8_blockscale.py]=45
     FILE_TIMES[op_tests/test_kvcache_blockscale.py]=25
     FILE_TIMES[op_tests/test_pa_ragged.py]=25
     FILE_TIMES[op_tests/test_sampling.py]=25
