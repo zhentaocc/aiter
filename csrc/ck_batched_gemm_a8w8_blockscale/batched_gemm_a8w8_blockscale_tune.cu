@@ -5,9 +5,9 @@
 // the Python tune driver can sweep them and pick the fastest per (B,M,N,K).
 // Mirrors ``ck_batched_gemm_a8w8/batched_gemm_a8w8_tune.cu``.
 
-#include "batched_gemm_fp8_blockscale_common.cuh"
-#include "batched_gemm_fp8_blockscale_lookup.h"
-#include "batched_gemm_fp8_blockscale_manifest.h"
+#include "batched_gemm_a8w8_blockscale_common.cuh"
+#include "batched_gemm_a8w8_blockscale_lookup.h"
+#include "batched_gemm_a8w8_blockscale_manifest.h"
 #include <cmath>
 
 using BatchedBlockscaleKernel = std::function<torch::Tensor(
@@ -16,7 +16,7 @@ using BatchedBlockscaleKernel = std::function<torch::Tensor(
 using BatchedBlockscaleKernelMap = std::unordered_map<int, BatchedBlockscaleKernel>;
 
 template <typename DDataType, typename EDataType>
-torch::Tensor batched_gemm_fp8_blockscale_tune(torch::Tensor& XQ,
+torch::Tensor batched_gemm_a8w8_blockscale_tune(torch::Tensor& XQ,
                                               torch::Tensor& WQ,
                                               torch::Tensor& x_scale,
                                               torch::Tensor& w_scale,
@@ -30,7 +30,7 @@ torch::Tensor batched_gemm_fp8_blockscale_tune(torch::Tensor& XQ,
     return it->second(XQ, WQ, x_scale, w_scale, Y);
 }
 
-torch::Tensor batched_gemm_fp8_blockscale_tune(torch::Tensor& XQ,
+torch::Tensor batched_gemm_a8w8_blockscale_tune(torch::Tensor& XQ,
                                               torch::Tensor& WQ,
                                               torch::Tensor& x_scale,
                                               torch::Tensor& w_scale,
@@ -38,9 +38,9 @@ torch::Tensor batched_gemm_fp8_blockscale_tune(torch::Tensor& XQ,
                                               int kernelId,
                                               int splitK) {
     if (Y.dtype() == at::ScalarType::Half) {
-        return batched_gemm_fp8_blockscale_tune<FP32, FP16>(XQ, WQ, x_scale, w_scale, Y, kernelId, splitK);
+        return batched_gemm_a8w8_blockscale_tune<FP32, FP16>(XQ, WQ, x_scale, w_scale, Y, kernelId, splitK);
     } else if (Y.dtype() == at::ScalarType::BFloat16) {
-        return batched_gemm_fp8_blockscale_tune<FP32, BF16>(XQ, WQ, x_scale, w_scale, Y, kernelId, splitK);
+        return batched_gemm_a8w8_blockscale_tune<FP32, BF16>(XQ, WQ, x_scale, w_scale, Y, kernelId, splitK);
     }
     TORCH_CHECK(false, "FP8 block-wise batched GEMM tune: unsupported output dtype");
 }

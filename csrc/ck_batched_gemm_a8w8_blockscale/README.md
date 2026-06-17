@@ -1,6 +1,6 @@
 # CK Batched GEMM FP8 Block-wise (DeepSeek V4 `wo_a`)
 
-CK port of `aiter.batched_gemm_fp8_blockscale`, mirroring the
+CK port of `aiter.batched_gemm_a8w8_blockscale`, mirroring the
 `ck_batched_gemm_a8w8` directory structure and the
 `ck_gemm_a8w8_blockscale` block-scale logic.
 
@@ -24,21 +24,21 @@ deep_gemm.fp8_einsum("bmk,bnk->bmn",
 ## Layout
 
 ```
-ck_batched_gemm_fp8_blockscale/
+ck_batched_gemm_a8w8_blockscale/
 ├── README.md                                      (this file)
-├── batched_gemm_fp8_blockscale.cu                  -- production dispatcher (heuristic + lookup)
-├── batched_gemm_fp8_blockscale_tune.cu             -- tune entry: kernel-by-id selector
-├── batched_gemm_fp8_blockscale_tune.py             -- tune driver, sweeps candidate_kernels_dict
-├── batched_gemm_fp8_blockscale_instance.py         -- KernelInstance dataclass + candidate kernels
+├── batched_gemm_a8w8_blockscale.cu                  -- production dispatcher (heuristic + lookup)
+├── batched_gemm_a8w8_blockscale_tune.cu             -- tune entry: kernel-by-id selector
+├── batched_gemm_a8w8_blockscale_tune.py             -- tune driver, sweeps candidate_kernels_dict
+├── batched_gemm_a8w8_blockscale_instance.py         -- KernelInstance dataclass + candidate kernels
 ├── gen_instances.py                               -- codegen: instance .cu, lookup.h, manifest.h
 ├── include/
-│   ├── batched_gemm_fp8_blockscale.h               -- public header
-│   └── batched_gemm_fp8_blockscale_common.cuh      -- CK template + host B-loop wrapper
+│   ├── batched_gemm_a8w8_blockscale.h               -- public header
+│   └── batched_gemm_a8w8_blockscale_common.cuh      -- CK template + host B-loop wrapper
 └── instances/                                     -- (autogen) one .cpp per (tile, dtype)
 
 # Generated next to gen_instances.py at JIT/build time:
-#   batched_gemm_fp8_blockscale_lookup.h
-#   batched_gemm_fp8_blockscale_manifest.h
+#   batched_gemm_a8w8_blockscale_lookup.h
+#   batched_gemm_a8w8_blockscale_manifest.h
 #   impl/<kernel_name>.cuh
 ```
 
@@ -49,25 +49,25 @@ non-batched FP8 AB-scale device op used by `ck_gemm_a8w8_blockscale`)
 but does **not** ship a `DeviceBatchedGemmMultiD_ABScale_Xdl_CShuffle_V3`
 equivalent.  We implement the B dimension as an outer loop in the host
 wrapper -- one `MakeArgument` + `invoker.Run` per batch slice on the
-same hipStream (see `include/batched_gemm_fp8_blockscale_common.cuh:batched_gemm_fp8_blockscale_impl`).
+same hipStream (see `include/batched_gemm_a8w8_blockscale_common.cuh:batched_gemm_a8w8_blockscale_impl`).
 
 For the wo_a use case (`B = num_groups <= 16`) this adds
 `~B * ~few-microseconds` of dispatch overhead, which is small relative
 to the per-call HBM traffic for V4-Flash decode shapes.  When CK adds
 a true batched ABScale device op, swap the device-op alias in
-`include/batched_gemm_fp8_blockscale_common.cuh` and remove the loop --
+`include/batched_gemm_a8w8_blockscale_common.cuh` and remove the loop --
 the rest of this directory does not change.
 
 ## Build
 
 Wired into `aiter/jit/optCompilerConfig.json` as two modules:
 
-  * `module_batched_gemm_fp8_blockscale`      (production dispatcher)
-  * `module_batched_gemm_fp8_blockscale_tune` (tune harness)
+  * `module_batched_gemm_a8w8_blockscale`      (production dispatcher)
+  * `module_batched_gemm_a8w8_blockscale_tune` (tune harness)
 
-Both are JIT-compiled on first use of `aiter.batched_gemm_fp8_blockscale`
+Both are JIT-compiled on first use of `aiter.batched_gemm_a8w8_blockscale`
 or the loader entry points in
-`aiter/aiter/ops/batched_gemm_op_fp8_blockscale.py`.
+`aiter/aiter/ops/batched_gemm_op_a8w8_blockscale.py`.
 
 To pre-build:
 ```bash
@@ -78,15 +78,15 @@ PREBUILD_KERNELS=1 python setup.py develop
 
 ```bash
 # 1) Add (B, M, N, K) shapes to the untuned CSV:
-cat aiter/configs/fp8_blockscale_untuned_batched_gemm.csv
+cat aiter/configs/a8w8_blockscale_untuned_batched_gemm.csv
 
 # 2) Run the sweep (will hipcc-compile every candidate per shape):
-python3 csrc/ck_batched_gemm_fp8_blockscale/batched_gemm_fp8_blockscale_tune.py \
-    -i aiter/configs/fp8_blockscale_untuned_batched_gemm.csv \
-    -o aiter/configs/fp8_blockscale_tuned_batched_gemm.csv
+python3 csrc/ck_batched_gemm_a8w8_blockscale/batched_gemm_a8w8_blockscale_tune.py \
+    -i aiter/configs/a8w8_blockscale_untuned_batched_gemm.csv \
+    -o aiter/configs/a8w8_blockscale_tuned_batched_gemm.csv
 
 # 3) Rebuild with the tuned table:
-AITER_REBUILD=1 python op_tests/test_batched_gemm_fp8_blockscale.py
+AITER_REBUILD=1 python op_tests/test_batched_gemm_a8w8_blockscale.py
 ```
 
 ## Status
@@ -99,8 +99,8 @@ AITER_REBUILD=1 python op_tests/test_batched_gemm_fp8_blockscale.py
 | Tune harness (.cu + .py) | **Written** |
 | 19 candidate tile instances | **Seeded** (same set as `ck_gemm_a8w8_blockscale`; gfx9-family validated) |
 | pybind binding + JIT config | **Wired** |
-| Python loader | **Written** (`aiter/ops/batched_gemm_op_fp8_blockscale.py`) |
-| Wrapper integration (`backend="ck"`) | **Wired** in `aiter/ops/batched_gemm_op_fp8_blockscale.py` |
+| Python loader | **Written** (`aiter/ops/batched_gemm_op_a8w8_blockscale.py`) |
+| Wrapper integration (`backend="ck"`) | **Wired** in `aiter/ops/batched_gemm_op_a8w8_blockscale.py` |
 | Compile validation (hipcc) | **Not run on this host** -- requires the `rocm/atom-dev:vllm-latest` image or equivalent |
 | Tune sweep (hours of hipcc) | **Not run** -- caller's choice when to invest the time |
 
@@ -118,6 +118,6 @@ docker run --rm --device /dev/kfd --device /dev/dri \
              W=torch.randn(B,N,K,device=\"cuda\").to(torch.float8_e4m3fn); \
              As=torch.rand(B,M,K//128,device=\"cuda\"); \
              Ws=torch.rand(B,N//128,K//128,device=\"cuda\"); \
-             out=aiter.batched_gemm_fp8_blockscale(A,W,As,Ws,backend=\"ck\"); \
+             out=aiter.batched_gemm_a8w8_blockscale(A,W,As,Ws,backend=\"ck\"); \
              print(out.shape)'"
 ```

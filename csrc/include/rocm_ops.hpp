@@ -255,20 +255,20 @@ namespace py = pybind11;
           py::arg("kernelId") = 0,    \
           py::arg("splitK")   = 0);
 
-#define BATCHED_GEMM_FP8_BLOCKSCALE_PYBIND      \
-    m.def("batched_gemm_fp8_blockscale",        \
-          &batched_gemm_fp8_blockscale,         \
-          "batched_gemm_fp8_blockscale",        \
+#define BATCHED_GEMM_A8W8_BLOCKSCALE_PYBIND      \
+    m.def("batched_gemm_a8w8_blockscale",        \
+          &batched_gemm_a8w8_blockscale,         \
+          "batched_gemm_a8w8_blockscale",        \
           py::arg("XQ"),                       \
           py::arg("WQ"),                       \
           py::arg("x_scale"),                  \
           py::arg("w_scale"),                  \
           py::arg("Out"));
 
-#define BATCHED_GEMM_FP8_BLOCKSCALE_TUNE_PYBIND \
-    m.def("batched_gemm_fp8_blockscale_tune",   \
-          &batched_gemm_fp8_blockscale_tune,    \
-          "batched_gemm_fp8_blockscale_tune",   \
+#define BATCHED_GEMM_A8W8_BLOCKSCALE_TUNE_PYBIND \
+    m.def("batched_gemm_a8w8_blockscale_tune",   \
+          &batched_gemm_a8w8_blockscale_tune,    \
+          "batched_gemm_a8w8_blockscale_tune",   \
           py::arg("XQ"),                       \
           py::arg("WQ"),                       \
           py::arg("x_scale"),                  \

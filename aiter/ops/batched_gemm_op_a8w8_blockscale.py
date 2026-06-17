@@ -34,9 +34,9 @@ from aiter import logger as _aiter_logger
 from aiter.jit.core import compile_ops
 
 logger = _aiter_logger
-_log = logger.getChild("batched_gemm_fp8_blockscale")
+_log = logger.getChild("batched_gemm_a8w8_blockscale")
 
-__all__ = ["batched_gemm_fp8_blockscale", "batched_gemm_fp8_blockscale_tune"]
+__all__ = ["batched_gemm_a8w8_blockscale", "batched_gemm_a8w8_blockscale_tune"]
 
 
 # ----------------------------------------------------------------------------
@@ -55,11 +55,11 @@ def _gen_fake_out(
 
 
 @compile_ops(
-    "module_batched_gemm_fp8_blockscale",
-    fc_name="batched_gemm_fp8_blockscale",
+    "module_batched_gemm_a8w8_blockscale",
+    fc_name="batched_gemm_a8w8_blockscale",
     gen_fake=_gen_fake_out,
 )
-def _batched_gemm_fp8_blockscale(
+def _batched_gemm_a8w8_blockscale(
     XQ: torch.Tensor,
     WQ: torch.Tensor,
     x_scale: torch.Tensor,
@@ -69,11 +69,11 @@ def _batched_gemm_fp8_blockscale(
 
 
 @compile_ops(
-    "module_batched_gemm_fp8_blockscale_tune",
-    fc_name="batched_gemm_fp8_blockscale_tune",
+    "module_batched_gemm_a8w8_blockscale_tune",
+    fc_name="batched_gemm_a8w8_blockscale_tune",
     gen_fake=lambda XQ, WQ, x_scale, w_scale, Out, kernelId, splitK=0: Out,
 )
-def batched_gemm_fp8_blockscale_tune(
+def batched_gemm_a8w8_blockscale_tune(
     XQ: torch.Tensor,
     WQ: torch.Tensor,
     x_scale: torch.Tensor,
@@ -118,7 +118,7 @@ def _ue8m0_to_fp32(scales_u8: torch.Tensor) -> torch.Tensor:
 # ----------------------------------------------------------------------------
 
 
-def batched_gemm_fp8_blockscale(
+def batched_gemm_a8w8_blockscale(
     A: torch.Tensor,
     W: torch.Tensor,
     A_scale: torch.Tensor,
@@ -150,13 +150,13 @@ def batched_gemm_fp8_blockscale(
     N = W.shape[1]
     if A_scale.dtype != W_scale.dtype:
         raise ValueError(
-            f"batched_gemm_fp8_blockscale: A_scale.dtype ({A_scale.dtype}) "
+            f"batched_gemm_a8w8_blockscale: A_scale.dtype ({A_scale.dtype}) "
             f"and W_scale.dtype ({W_scale.dtype}) must match -- pass both as "
             f"torch.float32 or both as torch.uint8 (UE8M0)."
         )
     if A_scale.dtype not in (torch.float32, torch.uint8):
         raise TypeError(
-            f"batched_gemm_fp8_blockscale: scale dtype must be torch.float32 "
+            f"batched_gemm_a8w8_blockscale: scale dtype must be torch.float32 "
             f"or torch.uint8; got {A_scale.dtype}."
         )
 
@@ -168,5 +168,5 @@ def batched_gemm_fp8_blockscale(
         A_scale = _ue8m0_to_fp32(A_scale)
         W_scale = _ue8m0_to_fp32(W_scale)
 
-    _batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out)
+    _batched_gemm_a8w8_blockscale(A, W, A_scale, W_scale, out)
     return out

@@ -8,9 +8,9 @@
 
 #include <torch/extension.h>
 
-#include "batched_gemm_fp8_blockscale_common.cuh"
-#include "batched_gemm_fp8_blockscale_lookup.h"
-#include "batched_gemm_fp8_blockscale_manifest.h"
+#include "batched_gemm_a8w8_blockscale_common.cuh"
+#include "batched_gemm_a8w8_blockscale_lookup.h"
+#include "batched_gemm_a8w8_blockscale_manifest.h"
 
 using BatchedBlockscaleKernel = std::function<torch::Tensor(
     torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&)>;
@@ -83,7 +83,7 @@ static BatchedBlockscaleKernel batched_blockscale_dispatch(int B, int M, int N, 
     return batched_blockscale_heuristic_dispatch<DDataType, EDataType>(B, M, N, K);
 }
 
-torch::Tensor batched_gemm_fp8_blockscale(torch::Tensor& XQ,
+torch::Tensor batched_gemm_a8w8_blockscale(torch::Tensor& XQ,
                                          torch::Tensor& WQ,
                                          torch::Tensor& x_scale,
                                          torch::Tensor& w_scale,

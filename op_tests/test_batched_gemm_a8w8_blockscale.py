@@ -27,7 +27,7 @@ def run_torch(x, weight, x_scale, w_scale, dtype=dtypes.bf16):
 
 @perftest()
 def run_gemm_ck(x, weight, x_scale, w_scale, dtype=dtypes.bf16):
-    return aiter.batched_gemm_fp8_blockscale(x, weight, x_scale, w_scale)
+    return aiter.batched_gemm_a8w8_blockscale(x, weight, x_scale, w_scale)
 
 
 def test_gemm(dtype, b, m, n, k):

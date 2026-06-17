@@ -3,18 +3,18 @@
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Benchmark for ``aiter.batched_gemm_fp8_blockscale`` (CK FP8 block-scale
+Benchmark for ``aiter.batched_gemm_a8w8_blockscale`` (CK FP8 block-scale
 batched GEMM, DeepSeek V4 ``wo_a`` path).
 
 Usage:
     # Single shape
-    python bench_batched_gemm_fp8_blockscale.py --shape 2 128 1024 4096
+    python bench_batched_gemm_a8w8_blockscale.py --shape 2 128 1024 4096
 
     # DSv4 preset sweep (44 per-rank shapes from V4-Flash / V4-Pro)
-    python bench_batched_gemm_fp8_blockscale.py --preset dsv4
+    python bench_batched_gemm_a8w8_blockscale.py --preset dsv4
 
     # Save results to CSV
-    python bench_batched_gemm_fp8_blockscale.py --preset dsv4 -o results.csv
+    python bench_batched_gemm_a8w8_blockscale.py --preset dsv4 -o results.csv
 
 """
 
@@ -30,8 +30,8 @@ import aiter
 
 # Torch oracle lives next to the correctness test (not in the production
 # dispatcher module).
-from op_tests.test_batched_gemm_fp8_blockscale import (
-    _torch_batched_gemm_fp8_blockscale,
+from op_tests.test_batched_gemm_a8w8_blockscale import (
+    _torch_batched_gemm_a8w8_blockscale,
 )
 
 DEVICE = "cuda"
@@ -135,15 +135,15 @@ def bench_one(B, M, N, K, *, warmup, rep, accuracy):
     max_err = float("nan")
     rel_err = float("nan")
     if accuracy:
-        ref = _torch_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
-        out = aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
+        ref = _torch_batched_gemm_a8w8_blockscale(A, W, A_scale, W_scale)
+        out = aiter.batched_gemm_a8w8_blockscale(A, W, A_scale, W_scale)
         diff = (out.float() - ref.float()).abs()
         max_err = diff.max().item()
         rel_err = max_err / max(ref.float().abs().max().item(), 1e-6)
 
     # CK kernel timing (pure GPU time via CUDA events).
     ck = _cuda_event_us(
-        lambda: aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out=Y),
+        lambda: aiter.batched_gemm_a8w8_blockscale(A, W, A_scale, W_scale, out=Y),
         warmup=warmup,
         iters=rep,
     )
@@ -153,7 +153,7 @@ def bench_one(B, M, N, K, *, warmup, rep, accuracy):
     # it's much slower). Median only.
     torch_iters = max(3, rep // 4)
     torch_samples = _cuda_event_us(
-        lambda: _torch_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale),
+        lambda: _torch_batched_gemm_a8w8_blockscale(A, W, A_scale, W_scale),
         warmup=2,
         iters=torch_iters,
     )
@@ -195,7 +195,7 @@ def bench_one(B, M, N, K, *, warmup, rep, accuracy):
 
 def run_single_benchmark(args):
     B, M, N, K = args.shape
-    print(f"\nBenchmarking batched_gemm_fp8_blockscale: B={B} M={M} N={N} K={K}\n")
+    print(f"\nBenchmarking batched_gemm_a8w8_blockscale: B={B} M={M} N={N} K={K}\n")
     r = bench_one(
         B, M, N, K, warmup=args.warmup, rep=args.rep, accuracy=not args.no_accuracy
     )
@@ -290,7 +290,7 @@ def _save_results_csv(filepath, results):
 
 def parse_args():
     p = argparse.ArgumentParser(
-        prog="Benchmark batched_gemm_fp8_blockscale",
+        prog="Benchmark batched_gemm_a8w8_blockscale",
         description="Benchmark CK FP8 block-scale batched GEMM (DeepSeek V4 wo_a).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )

@@ -136,7 +136,7 @@ using DeviceGemmHelperF8BlockScalePerBatch =
 // ---------------------------------------------------------------------------
 // Host wrapper: loop over B and dispatch the per-batch invoker.
 //
-// Layout assumptions (matches the contract in batched_gemm_fp8_blockscale.h):
+// Layout assumptions (matches the contract in batched_gemm_a8w8_blockscale.h):
 //   XQ        [B, M, K] fp8_e4m3fn   row-major,           strides {M*K, K, 1}
 //   WQ        [B, N, K] fp8_e4m3fn   N-major-then-K,      strides {N*K, K, 1}
 //                                    (CK B0Layout = Col means the [N, K] view
@@ -148,7 +148,7 @@ using DeviceGemmHelperF8BlockScalePerBatch =
 // ---------------------------------------------------------------------------
 
 template <typename DDataType, typename EDataType, typename GemmInstance>
-__forceinline__ torch::Tensor batched_gemm_fp8_blockscale_impl(torch::Tensor& XQ,
+__forceinline__ torch::Tensor batched_gemm_a8w8_blockscale_impl(torch::Tensor& XQ,
                                                               torch::Tensor& WQ,
                                                               torch::Tensor& x_scale,
                                                               torch::Tensor& w_scale,

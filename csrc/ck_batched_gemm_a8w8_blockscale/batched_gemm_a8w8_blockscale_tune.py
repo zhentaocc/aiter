@@ -6,15 +6,15 @@ Tune driver for the CK FP8 block-wise *batched* GEMM.
 
 Mirrors ``ck_batched_gemm_a8w8/batched_gemm_a8w8_tune.py`` -- iterates every
 ``(B, M, N, K)`` row in ``-i untuned.csv``, builds and times every
-candidate kernel from ``batched_gemm_fp8_blockscale_instance.candidate_kernels_dict``,
+candidate kernel from ``batched_gemm_a8w8_blockscale_instance.candidate_kernels_dict``,
 verifies correctness against a torch-dequant + ``torch.bmm`` oracle, and
 writes the best (kernelId, splitK, us) per shape to ``-o tuned.csv``.
 
 Run inside the rocm/atom-dev:vllm-latest docker (or any image with hipcc):
 
-    python3 csrc/ck_batched_gemm_fp8_blockscale/batched_gemm_fp8_blockscale_tune.py \\
-        -i aiter/configs/fp8_blockscale_untuned_batched_gemm.csv \\
-        -o aiter/configs/fp8_blockscale_tuned_batched_gemm.csv
+    python3 csrc/ck_batched_gemm_a8w8_blockscale/batched_gemm_a8w8_blockscale_tune.py \\
+        -i aiter/configs/a8w8_blockscale_untuned_batched_gemm.csv \\
+        -o aiter/configs/a8w8_blockscale_tuned_batched_gemm.csv
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import torch
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _THIS_DIR)
 
-from batched_gemm_fp8_blockscale_instance import candidate_kernels_dict  # noqa: E402
+from batched_gemm_a8w8_blockscale_instance import candidate_kernels_dict  # noqa: E402
 
 
 def _torch_oracle(XQ, WQ, x_scale, w_scale) -> torch.Tensor:
@@ -120,9 +120,9 @@ def main() -> int:
         raise SystemExit("requires CUDA/HIP device for tuning")
 
     # Late import so the JIT build is triggered exactly once per (rebuild).
-    import aiter  # noqa: F401  (ensures module_batched_gemm_fp8_blockscale_tune is JIT-built)
-    from aiter.ops.batched_gemm_op_fp8_blockscale import (
-        batched_gemm_fp8_blockscale_tune as tune_fn,
+    import aiter  # noqa: F401  (ensures module_batched_gemm_a8w8_blockscale_tune is JIT-built)
+    from aiter.ops.batched_gemm_op_a8w8_blockscale import (
+        batched_gemm_a8w8_blockscale_tune as tune_fn,
     )
 
     cu_num = torch.cuda.get_device_properties(0).multi_processor_count
