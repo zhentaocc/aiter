@@ -18,7 +18,9 @@ def run_torch(x, weight, x_scale, w_scale, dtype=dtypes.bf16):
     Kg, Ng = K // BLOCK, N // BLOCK
     a = x.to(dtypes.fp32).view(B, M, Kg, BLOCK) * x_scale.unsqueeze(-1)
     a = a.view(B, M, K).to(dtypes.bf16)
-    w = weight.to(dtypes.fp32).view(B, Ng, BLOCK, Kg, BLOCK) * w_scale.view(B, Ng, 1, Kg, 1)
+    w = weight.to(dtypes.fp32).view(B, Ng, BLOCK, Kg, BLOCK) * w_scale.view(
+        B, Ng, 1, Kg, 1
+    )
     w = w.view(B, N, K).to(dtypes.bf16)
     return torch.bmm(a, w.transpose(1, 2)).to(dtype)
 
@@ -30,15 +32,30 @@ def run_gemm_ck(x, weight, x_scale, w_scale, dtype=dtypes.bf16):
 
 def test_gemm(dtype, b, m, n, k):
     dim = (b, m, n, k)
-    x = (torch.randn(b, m, k, dtype=dtypes.fp32, device="cuda") * 0.5).clamp(-8, 8).to(dtypes.fp8)
-    weight = (torch.randn(b, n, k, dtype=dtypes.fp32, device="cuda") * 0.5).clamp(-8, 8).to(dtypes.fp8)
-    x_scale = torch.rand([b, m, k // BLOCK], dtype=dtypes.fp32, device="cuda") * 0.1 + 0.01
-    w_scale = torch.rand([b, n // BLOCK, k // BLOCK], dtype=dtypes.fp32, device="cuda") * 0.1 + 0.01
+    x = (
+        (torch.randn(b, m, k, dtype=dtypes.fp32, device="cuda") * 0.5)
+        .clamp(-8, 8)
+        .to(dtypes.fp8)
+    )
+    weight = (
+        (torch.randn(b, n, k, dtype=dtypes.fp32, device="cuda") * 0.5)
+        .clamp(-8, 8)
+        .to(dtypes.fp8)
+    )
+    x_scale = (
+        torch.rand([b, m, k // BLOCK], dtype=dtypes.fp32, device="cuda") * 0.1 + 0.01
+    )
+    w_scale = (
+        torch.rand([b, n // BLOCK, k // BLOCK], dtype=dtypes.fp32, device="cuda") * 0.1
+        + 0.01
+    )
 
     a, avg_a = run_torch(x, weight, x_scale, w_scale, dtype)
     c, avg_c = run_gemm_ck(x, weight, x_scale, w_scale, dtype)
     msg = f"[perf] dim: {str(dim):<24} dtype: {dtype}, torch avg: {avg_a:<8.2f} us, ck avg: {avg_c:<8.2f} us, uplift: {avg_a/avg_c-1:<5.1%}"
-    checkAllclose(a, c, msg="a,c: " + msg, rtol=2e-2, atol=4e-2, catastrophic_check=True)
+    checkAllclose(
+        a, c, msg="a,c: " + msg, rtol=2e-2, atol=4e-2, catastrophic_check=True
+    )
 
 
 parser = argparse.ArgumentParser(

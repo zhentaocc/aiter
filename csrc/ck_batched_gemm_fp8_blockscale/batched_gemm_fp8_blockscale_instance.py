@@ -48,8 +48,20 @@ class KernelInstance:
         return ("_").join(
             [
                 "a8w8_batched_blockscale",
-                ("x").join(map(str, [self.ScaleBlockM, self.ScaleBlockN, self.ScaleBlockK])),
-                ("x").join(map(str, [self.BLOCK_SIZE, self.MPerBLOCK, self.NPerBLOCK, self.KPerBLOCK])),
+                ("x").join(
+                    map(str, [self.ScaleBlockM, self.ScaleBlockN, self.ScaleBlockK])
+                ),
+                ("x").join(
+                    map(
+                        str,
+                        [
+                            self.BLOCK_SIZE,
+                            self.MPerBLOCK,
+                            self.NPerBLOCK,
+                            self.KPerBLOCK,
+                        ],
+                    )
+                ),
                 ("x").join(map(str, [self.AK1, self.BK1])),
                 ("x").join(map(str, [self.MPerXDL, self.NPerXDL])),
                 ("x").join(map(str, [self.WAVE_MAP_M, self.WAVE_MAP_N])),
@@ -57,8 +69,15 @@ class KernelInstance:
                 ("x").join(map(str, self.BBLOCK_TRANSFER)),
                 ("x").join(map(str, self.CBLOCK_TRANSFER)),
                 ("x").join(map(str, self.CBLOCK_SPV)),
-                ("x").join(map(str, [self.CSHUFFLE_MX_PER_WAVE_PERSHUFFLE,
-                                     self.CSHUFFLE_NX_PER_WAVE_PERSHUFFLE])),
+                ("x").join(
+                    map(
+                        str,
+                        [
+                            self.CSHUFFLE_MX_PER_WAVE_PERSHUFFLE,
+                            self.CSHUFFLE_NX_PER_WAVE_PERSHUFFLE,
+                        ],
+                    )
+                ),
                 self.PIPELINE_Sched.lower(),
                 f"v{self.PIPELINE_VERSION}",
             ]

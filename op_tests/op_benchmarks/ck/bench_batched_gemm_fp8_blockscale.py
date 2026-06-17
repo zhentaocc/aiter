@@ -27,6 +27,7 @@ from pathlib import Path
 import torch
 
 import aiter
+
 # Torch oracle lives next to the correctness test (not in the production
 # dispatcher module).
 from op_tests.test_batched_gemm_fp8_blockscale import (
@@ -55,7 +56,7 @@ SMOKE_BATCHES = [1, 2]
 SMOKE_MS = [128, 1024]
 
 PRESETS = {
-    "dsv4":  [(b, m, DSV4_N, DSV4_K) for b in DSV4_BATCHES for m in DSV4_MS],
+    "dsv4": [(b, m, DSV4_N, DSV4_K) for b in DSV4_BATCHES for m in DSV4_MS],
     "smoke": [(b, m, DSV4_N, DSV4_K) for b in SMOKE_BATCHES for m in SMOKE_MS],
 }
 
@@ -64,21 +65,35 @@ PRESETS = {
 # Input helpers.
 # -----------------------------------------------------------------------------
 
+
 def _make_inputs(B, M, N, K, *, seed=0):
     g = torch.Generator(device=DEVICE).manual_seed(seed)
-    A = (torch.randn(B, M, K, generator=g, device=DEVICE, dtype=torch.float32) * 0.5
-         ).clamp(-8.0, 8.0).to(torch.float8_e4m3fn)
-    W = (torch.randn(B, N, K, generator=g, device=DEVICE, dtype=torch.float32) * 0.5
-         ).clamp(-8.0, 8.0).to(torch.float8_e4m3fn)
+    A = (
+        (torch.randn(B, M, K, generator=g, device=DEVICE, dtype=torch.float32) * 0.5)
+        .clamp(-8.0, 8.0)
+        .to(torch.float8_e4m3fn)
+    )
+    W = (
+        (torch.randn(B, N, K, generator=g, device=DEVICE, dtype=torch.float32) * 0.5)
+        .clamp(-8.0, 8.0)
+        .to(torch.float8_e4m3fn)
+    )
     K_g, N_g = K // 128, N // 128
-    A_scale = torch.rand(B, M, K_g, generator=g, device=DEVICE, dtype=torch.float32) * 0.1 + 0.01
-    W_scale = torch.rand(B, N_g, K_g, generator=g, device=DEVICE, dtype=torch.float32) * 0.1 + 0.01
+    A_scale = (
+        torch.rand(B, M, K_g, generator=g, device=DEVICE, dtype=torch.float32) * 0.1
+        + 0.01
+    )
+    W_scale = (
+        torch.rand(B, N_g, K_g, generator=g, device=DEVICE, dtype=torch.float32) * 0.1
+        + 0.01
+    )
     return A, W, A_scale, W_scale
 
 
 # -----------------------------------------------------------------------------
 # Per-shape bench.
 # -----------------------------------------------------------------------------
+
 
 def _cuda_event_us(fn, *, warmup, iters):
     """Pure-GPU latency samples (us) via CUDA events.
@@ -106,8 +121,8 @@ def _cuda_event_us(fn, *, warmup, iters):
 
 def _pcts(samples):
     return (
-        samples[len(samples) // 2],                              # p50
-        samples[max(0, int(len(samples) * 0.20) - 1)],          # p20
+        samples[len(samples) // 2],  # p50
+        samples[max(0, int(len(samples) * 0.20) - 1)],  # p20
         samples[min(len(samples) - 1, int(len(samples) * 0.80))],  # p80
     )
 
@@ -129,7 +144,9 @@ def bench_one(B, M, N, K, *, warmup, rep, accuracy):
     # CK kernel timing (pure GPU time via CUDA events).
     ck = _cuda_event_us(
         lambda: aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out=Y),
-        warmup=warmup, iters=rep)
+        warmup=warmup,
+        iters=rep,
+    )
     us, p20, p80 = _pcts(ck)
 
     # Torch dequant + bf16 bmm reference, timed the same way (fewer iters --
@@ -137,24 +154,37 @@ def bench_one(B, M, N, K, *, warmup, rep, accuracy):
     torch_iters = max(3, rep // 4)
     torch_samples = _cuda_event_us(
         lambda: _torch_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale),
-        warmup=2, iters=torch_iters)
+        warmup=2,
+        iters=torch_iters,
+    )
     torch_us = torch_samples[len(torch_samples) // 2]
     speedup = torch_us / us if us > 0 else float("nan")
 
     flops = 2.0 * B * M * N * K
     tflops = flops / (us * 1e-6) / 1e12
-    bytes_io = (A.numel() * A.element_size() + W.numel() * W.element_size() +
-                A_scale.numel() * A_scale.element_size() +
-                W_scale.numel() * W_scale.element_size() +
-                Y.numel() * Y.element_size())
+    bytes_io = (
+        A.numel() * A.element_size()
+        + W.numel() * W.element_size()
+        + A_scale.numel() * A_scale.element_size()
+        + W_scale.numel() * W_scale.element_size()
+        + Y.numel() * Y.element_size()
+    )
     bw_gb_s = bytes_io / (us * 1e-6) / 1e9
 
     return {
-        "B": B, "M": M, "N": N, "K": K,
-        "median_us": us, "p20_us": p20, "p80_us": p80,
-        "torch_us": torch_us, "speedup": speedup,
-        "tflops": tflops, "bw_gb_s": bw_gb_s,
-        "max_err": max_err, "rel_err": rel_err,
+        "B": B,
+        "M": M,
+        "N": N,
+        "K": K,
+        "median_us": us,
+        "p20_us": p20,
+        "p80_us": p80,
+        "torch_us": torch_us,
+        "speedup": speedup,
+        "tflops": tflops,
+        "bw_gb_s": bw_gb_s,
+        "max_err": max_err,
+        "rel_err": rel_err,
     }
 
 
@@ -162,13 +192,17 @@ def bench_one(B, M, N, K, *, warmup, rep, accuracy):
 # Runners (single shape + sweep, mirrors bench_topk_topp_sampling.py).
 # -----------------------------------------------------------------------------
 
+
 def run_single_benchmark(args):
     B, M, N, K = args.shape
     print(f"\nBenchmarking batched_gemm_fp8_blockscale: B={B} M={M} N={N} K={K}\n")
-    r = bench_one(B, M, N, K, warmup=args.warmup, rep=args.rep,
-                  accuracy=not args.no_accuracy)
+    r = bench_one(
+        B, M, N, K, warmup=args.warmup, rep=args.rep, accuracy=not args.no_accuracy
+    )
     print("Results:")
-    print(f"  CK median:      {r['median_us']:.2f} us  (p20={r['p20_us']:.2f}, p80={r['p80_us']:.2f})")
+    print(
+        f"  CK median:      {r['median_us']:.2f} us  (p20={r['p20_us']:.2f}, p80={r['p80_us']:.2f})"
+    )
     print(f"  Torch ref:      {r['torch_us']:.2f} us")
     print(f"  Speedup:        {r['speedup']:.2f}x")
     print(f"  Throughput:     {r['tflops']:.2f} TFLOP/s")
@@ -190,29 +224,42 @@ def run_sweep_benchmark(args):
         ks = args.ks or [DSV4_K]
         shapes = list(itertools.product(batches, ms, ns, ks))
 
-    print(f"\nRunning sweep across {len(shapes)} shapes "
-          f"(preset={args.preset or 'custom'})\n")
+    print(
+        f"\nRunning sweep across {len(shapes)} shapes "
+        f"(preset={args.preset or 'custom'})\n"
+    )
 
-    header = (f"{'B':>4} {'M':>5} {'N':>5} {'K':>5} "
-              f"{'ck_us':>9} {'p20':>8} {'p80':>8} {'torch_us':>9} {'speedup':>8} "
-              f"{'TFLOPS':>7} {'GB/s':>7} {'max_err':>9} {'rel_err':>9}")
+    header = (
+        f"{'B':>4} {'M':>5} {'N':>5} {'K':>5} "
+        f"{'ck_us':>9} {'p20':>8} {'p80':>8} {'torch_us':>9} {'speedup':>8} "
+        f"{'TFLOPS':>7} {'GB/s':>7} {'max_err':>9} {'rel_err':>9}"
+    )
     print(header)
     print("-" * len(header))
 
     results = []
     for B, M, N, K in shapes:
         try:
-            r = bench_one(B, M, N, K, warmup=args.warmup, rep=args.rep,
-                          accuracy=not args.no_accuracy)
+            r = bench_one(
+                B,
+                M,
+                N,
+                K,
+                warmup=args.warmup,
+                rep=args.rep,
+                accuracy=not args.no_accuracy,
+            )
         except Exception as e:
             print(f"{B:>4} {M:>5} {N:>5} {K:>5}  FAIL: {e}")
             continue
         results.append(r)
-        print(f"{B:>4} {M:>5} {N:>5} {K:>5} "
-              f"{r['median_us']:>9.2f} {r['p20_us']:>8.2f} {r['p80_us']:>8.2f} "
-              f"{r['torch_us']:>9.2f} {r['speedup']:>7.2f}x "
-              f"{r['tflops']:>7.1f} {r['bw_gb_s']:>7.1f} "
-              f"{r['max_err']:>9.4f} {r['rel_err']:>9.4f}")
+        print(
+            f"{B:>4} {M:>5} {N:>5} {K:>5} "
+            f"{r['median_us']:>9.2f} {r['p20_us']:>8.2f} {r['p80_us']:>8.2f} "
+            f"{r['torch_us']:>9.2f} {r['speedup']:>7.2f}x "
+            f"{r['tflops']:>7.1f} {r['bw_gb_s']:>7.1f} "
+            f"{r['max_err']:>9.4f} {r['rel_err']:>9.4f}"
+        )
 
     print(f"\nCompleted {len(results)} / {len(shapes)} shapes.")
     if args.o:
@@ -222,13 +269,17 @@ def run_sweep_benchmark(args):
 def _save_results_csv(filepath, results):
     path = Path(filepath)
     with open(path, "w") as f:
-        f.write("B,M,N,K,median_us,p20_us,p80_us,torch_us,speedup,tflops,bw_gb_s,max_err,rel_err\n")
+        f.write(
+            "B,M,N,K,median_us,p20_us,p80_us,torch_us,speedup,tflops,bw_gb_s,max_err,rel_err\n"
+        )
         for r in results:
-            f.write(f"{r['B']},{r['M']},{r['N']},{r['K']},"
-                    f"{r['median_us']:.3f},{r['p20_us']:.3f},{r['p80_us']:.3f},"
-                    f"{r['torch_us']:.3f},{r['speedup']:.4f},"
-                    f"{r['tflops']:.4f},{r['bw_gb_s']:.4f},"
-                    f"{r['max_err']:.6f},{r['rel_err']:.6f}\n")
+            f.write(
+                f"{r['B']},{r['M']},{r['N']},{r['K']},"
+                f"{r['median_us']:.3f},{r['p20_us']:.3f},{r['p80_us']:.3f},"
+                f"{r['torch_us']:.3f},{r['speedup']:.4f},"
+                f"{r['tflops']:.4f},{r['bw_gb_s']:.4f},"
+                f"{r['max_err']:.6f},{r['rel_err']:.6f}\n"
+            )
     print(f"Results saved to {path.resolve()}")
 
 
@@ -236,32 +287,54 @@ def _save_results_csv(filepath, results):
 # CLI.
 # -----------------------------------------------------------------------------
 
+
 def parse_args():
     p = argparse.ArgumentParser(
         prog="Benchmark batched_gemm_fp8_blockscale",
         description="Benchmark CK FP8 block-scale batched GEMM (DeepSeek V4 wo_a).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--shape", type=int, nargs=4, metavar=("B", "M", "N", "K"),
-                   help="Single-shape mode: B M N K (skips sweep).")
-    p.add_argument("--preset", choices=list(PRESETS),
-                   help=f"Shape preset for sweep (one of {list(PRESETS)}).")
-    p.add_argument("--batches", type=int, nargs="+",
-                   help=f"Custom B sweep (default: {DSV4_BATCHES}).")
-    p.add_argument("--ms", type=int, nargs="+",
-                   help=f"Custom M sweep (default: {DSV4_MS}).")
-    p.add_argument("--ns", type=int, nargs="+",
-                   help=f"Custom N sweep (default: [{DSV4_N}]).")
-    p.add_argument("--ks", type=int, nargs="+",
-                   help=f"Custom K sweep (default: [{DSV4_K}]).")
-    p.add_argument("--no-accuracy", action="store_true",
-                   help="Skip torch-oracle accuracy check (faster on big M).")
+    p.add_argument(
+        "--shape",
+        type=int,
+        nargs=4,
+        metavar=("B", "M", "N", "K"),
+        help="Single-shape mode: B M N K (skips sweep).",
+    )
+    p.add_argument(
+        "--preset",
+        choices=list(PRESETS),
+        help=f"Shape preset for sweep (one of {list(PRESETS)}).",
+    )
+    p.add_argument(
+        "--batches",
+        type=int,
+        nargs="+",
+        help=f"Custom B sweep (default: {DSV4_BATCHES}).",
+    )
+    p.add_argument(
+        "--ms", type=int, nargs="+", help=f"Custom M sweep (default: {DSV4_MS})."
+    )
+    p.add_argument(
+        "--ns", type=int, nargs="+", help=f"Custom N sweep (default: [{DSV4_N}])."
+    )
+    p.add_argument(
+        "--ks", type=int, nargs="+", help=f"Custom K sweep (default: [{DSV4_K}])."
+    )
+    p.add_argument(
+        "--no-accuracy",
+        action="store_true",
+        help="Skip torch-oracle accuracy check (faster on big M).",
+    )
     # Defaults match the tune driver (warmup=5, iters=20) so bench latencies
     # are directly comparable to the tuned-CSV ``us`` column.
     p.add_argument("--warmup", type=int, default=5)
-    p.add_argument("--rep", type=int, default=20, help="timed iterations (per-call sync)")
-    p.add_argument("-o", type=str, metavar="FILE",
-                   help="Output CSV file path for results.")
+    p.add_argument(
+        "--rep", type=int, default=20, help="timed iterations (per-call sync)"
+    )
+    p.add_argument(
+        "-o", type=str, metavar="FILE", help="Output CSV file path for results."
+    )
     return p.parse_args()
 
 

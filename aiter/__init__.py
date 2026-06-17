@@ -94,6 +94,7 @@ else:
     from .ops.gemm_op_a4w4 import *  # noqa: F403,E402
     from .ops.batched_gemm_op_a8w8 import *  # noqa: F403,E402
     from .ops.batched_gemm_op_bf16 import *  # noqa: F403,E402
+    from .ops.batched_gemm_op_fp8_blockscale import *  # noqa: F403,E402
     from .ops.deepgemm import *  # noqa: F403,E402
     from .ops.opus import *  # noqa: F403,E402
     from .ops.aiter_operator import *  # noqa: F403,E402
@@ -142,12 +143,3 @@ try:
 except (ImportError, AttributeError):
     # Iris or triton not available, skip import
     IRIS_COMM_AVAILABLE = False
-
-# DeepSeek V4 wo_a projection: FP8 block-wise batched GEMM
-# (recipe=(1, 1, 128); matches deep_gemm.fp8_einsum contract).
-try:
-    from .ops.batched_gemm_op_fp8_blockscale import (  # noqa: F401
-        batched_gemm_fp8_blockscale,
-    )
-except ImportError as _bgfp8_e:
-    logger.debug("batched_gemm_fp8_blockscale wrapper not available: %s", _bgfp8_e)

@@ -36,10 +36,13 @@ from aiter.jit.core import compile_ops
 logger = _aiter_logger
 _log = logger.getChild("batched_gemm_fp8_blockscale")
 
+__all__ = ["batched_gemm_fp8_blockscale", "batched_gemm_fp8_blockscale_tune"]
+
 
 # ----------------------------------------------------------------------------
 # JIT-compiled CK kernel bindings.
 # ----------------------------------------------------------------------------
+
 
 def _gen_fake_out(
     XQ: torch.Tensor,
@@ -51,8 +54,11 @@ def _gen_fake_out(
     return Out
 
 
-@compile_ops("module_batched_gemm_fp8_blockscale", fc_name="batched_gemm_fp8_blockscale",
-             gen_fake=_gen_fake_out)
+@compile_ops(
+    "module_batched_gemm_fp8_blockscale",
+    fc_name="batched_gemm_fp8_blockscale",
+    gen_fake=_gen_fake_out,
+)
 def _batched_gemm_fp8_blockscale(
     XQ: torch.Tensor,
     WQ: torch.Tensor,
@@ -62,8 +68,11 @@ def _batched_gemm_fp8_blockscale(
 ) -> torch.Tensor: ...
 
 
-@compile_ops("module_batched_gemm_fp8_blockscale_tune", fc_name="batched_gemm_fp8_blockscale_tune",
-             gen_fake=lambda XQ, WQ, x_scale, w_scale, Out, kernelId, splitK=0: Out)
+@compile_ops(
+    "module_batched_gemm_fp8_blockscale_tune",
+    fc_name="batched_gemm_fp8_blockscale_tune",
+    gen_fake=lambda XQ, WQ, x_scale, w_scale, Out, kernelId, splitK=0: Out,
+)
 def batched_gemm_fp8_blockscale_tune(
     XQ: torch.Tensor,
     WQ: torch.Tensor,

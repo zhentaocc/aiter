@@ -51,22 +51,44 @@ def _torch_oracle(XQ, WQ, x_scale, w_scale) -> torch.Tensor:
 
 def _make(B, M, N, K, *, seed=0, device="cuda"):
     g = torch.Generator(device=device).manual_seed(seed)
-    A = (torch.randn(B, M, K, generator=g, device=device, dtype=torch.float32) * 0.5).clamp(-8, 8).to(torch.float8_e4m3fn)
-    W = (torch.randn(B, N, K, generator=g, device=device, dtype=torch.float32) * 0.5).clamp(-8, 8).to(torch.float8_e4m3fn)
-    A_s = torch.rand(B, M, K // 128, generator=g, device=device, dtype=torch.float32) * 0.1 + 0.01
-    W_s = torch.rand(B, N // 128, K // 128, generator=g, device=device, dtype=torch.float32) * 0.1 + 0.01
+    A = (
+        (torch.randn(B, M, K, generator=g, device=device, dtype=torch.float32) * 0.5)
+        .clamp(-8, 8)
+        .to(torch.float8_e4m3fn)
+    )
+    W = (
+        (torch.randn(B, N, K, generator=g, device=device, dtype=torch.float32) * 0.5)
+        .clamp(-8, 8)
+        .to(torch.float8_e4m3fn)
+    )
+    A_s = (
+        torch.rand(B, M, K // 128, generator=g, device=device, dtype=torch.float32)
+        * 0.1
+        + 0.01
+    )
+    W_s = (
+        torch.rand(
+            B, N // 128, K // 128, generator=g, device=device, dtype=torch.float32
+        )
+        * 0.1
+        + 0.01
+    )
     return A, W, A_s, W_s
 
 
 def _bench_one(tune_fn, A, W, A_s, W_s, kid: int, *, iters=20, warmup=5) -> float:
-    Y = torch.empty((A.size(0), A.size(1), W.size(1)), dtype=torch.bfloat16, device=A.device)
+    Y = torch.empty(
+        (A.size(0), A.size(1), W.size(1)), dtype=torch.bfloat16, device=A.device
+    )
     # Correctness check first.
     ref = _torch_oracle(A, W, A_s, W_s)
     try:
         tune_fn(A, W, A_s, W_s, Y, kid, 0)
     except Exception as e:
         return float("inf")
-    err = (Y.float() - ref.float()).abs().max().item() / max(ref.float().abs().max().item(), 1e-6)
+    err = (Y.float() - ref.float()).abs().max().item() / max(
+        ref.float().abs().max().item(), 1e-6
+    )
     if err > 0.1:
         return float("inf")
     # Time.
@@ -85,7 +107,9 @@ def _bench_one(tune_fn, A, W, A_s, W_s, kid: int, *, iters=20, warmup=5) -> floa
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Tune CK FP8 block-wise batched GEMM")
-    ap.add_argument("-i", "--input_file", required=True, help="untuned shapes CSV (B,M,N,K columns)")
+    ap.add_argument(
+        "-i", "--input_file", required=True, help="untuned shapes CSV (B,M,N,K columns)"
+    )
     ap.add_argument("-o", "--output_file", required=True, help="best kernel CSV out")
     ap.add_argument("--profile_file", default="", help="optional all-results CSV")
     ap.add_argument("--sort", default=True, type=lambda x: x.lower() != "false")
@@ -97,7 +121,9 @@ def main() -> int:
 
     # Late import so the JIT build is triggered exactly once per (rebuild).
     import aiter  # noqa: F401  (ensures module_batched_gemm_fp8_blockscale_tune is JIT-built)
-    from aiter.ops.batched_gemm_op_fp8_blockscale import batched_gemm_fp8_blockscale_tune as tune_fn
+    from aiter.ops.batched_gemm_op_fp8_blockscale import (
+        batched_gemm_fp8_blockscale_tune as tune_fn,
+    )
 
     cu_num = torch.cuda.get_device_properties(0).multi_processor_count
 
@@ -110,25 +136,45 @@ def main() -> int:
         best_kid, best_us = -1, float("inf")
         for kid in candidate_kernels_dict.keys():
             us = _bench_one(tune_fn, A, W, A_s, W_s, kid, iters=args.iters)
-            profile_rows.append({
-                "cu_num": cu_num, "libtype": "ck",
-                "B": B, "M": M, "N": N, "K": K,
-                "kernelId": kid, "splitK": 0, "us": us,
-                "kernelName": candidate_kernels_dict[kid].name,
-            })
+            profile_rows.append(
+                {
+                    "cu_num": cu_num,
+                    "libtype": "ck",
+                    "B": B,
+                    "M": M,
+                    "N": N,
+                    "K": K,
+                    "kernelId": kid,
+                    "splitK": 0,
+                    "us": us,
+                    "kernelName": candidate_kernels_dict[kid].name,
+                }
+            )
             if us < best_us:
                 best_us, best_kid = us, kid
             print(f"[tune] B={B} M={M} N={N} K={K} kid={kid:2d} us={us:.2f}")
         flops = 2 * B * M * N * K
         tflops = flops / (best_us * 1e-6) / 1e12 if best_us != float("inf") else 0.0
-        rows.append({
-            "cu_num": cu_num, "libtype": "ck",
-            "B": B, "M": M, "N": N, "K": K,
-            "kernelId": best_kid, "splitK": 0, "us": best_us,
-            "kernelName": candidate_kernels_dict[best_kid].name if best_kid >= 0 else "",
-            "tflops": tflops,
-        })
-        print(f"[best] B={B} M={M} N={N} K={K} -> kid={best_kid} us={best_us:.2f} ({tflops:.1f} TFLOPs)")
+        rows.append(
+            {
+                "cu_num": cu_num,
+                "libtype": "ck",
+                "B": B,
+                "M": M,
+                "N": N,
+                "K": K,
+                "kernelId": best_kid,
+                "splitK": 0,
+                "us": best_us,
+                "kernelName": (
+                    candidate_kernels_dict[best_kid].name if best_kid >= 0 else ""
+                ),
+                "tflops": tflops,
+            }
+        )
+        print(
+            f"[best] B={B} M={M} N={N} K={K} -> kid={best_kid} us={best_us:.2f} ({tflops:.1f} TFLOPs)"
+        )
 
     out = pd.DataFrame(rows)
     if args.sort:

@@ -41,7 +41,9 @@ def _unique_instances_by_name(kernels_dict: dict) -> list:
 
 
 class batched_gemm_fp8_blockscale_codegen:
-    def __init__(self, working_path: str, istune: bool = False, tune_file: str | None = None):
+    def __init__(
+        self, working_path: str, istune: bool = False, tune_file: str | None = None
+    ):
         self.working_path = working_path
         if not os.path.exists(working_path):
             os.makedirs(working_path)
@@ -73,7 +75,9 @@ class batched_gemm_fp8_blockscale_codegen:
                 if kid in candidate_kernels_dict:
                     tune_dict[(B, M, N, K)] = candidate_kernels_dict[kid]
                 else:
-                    print(f"[gen_instances] kernelId {kid} missing for ({B},{M},{N},{K})")
+                    print(
+                        f"[gen_instances] kernelId {kid} missing for ({B},{M},{N},{K})"
+                    )
         return tune_dict
 
     # ------------------------------------------------------------------
@@ -167,15 +171,30 @@ torch::Tensor
 """
 
         IMPL_str = (
-            INSTANCE_IMPL
-            .replace("__INSTANCE_DEFAULT__", INSTANCE_BODY.replace("{GemmSpec}", "Default"))
-            .replace("__INSTANCE_MPAD__",    INSTANCE_BODY.replace("{GemmSpec}", "MPadding"))
-            .replace("__INSTANCE_NPAD__",    INSTANCE_BODY.replace("{GemmSpec}", "NPadding"))
-            .replace("__INSTANCE_KPAD__",    INSTANCE_BODY.replace("{GemmSpec}", "KPadding"))
-            .replace("__INSTANCE_MNPAD__",   INSTANCE_BODY.replace("{GemmSpec}", "MNPadding"))
-            .replace("__INSTANCE_MKPAD__",   INSTANCE_BODY.replace("{GemmSpec}", "MKPadding"))
-            .replace("__INSTANCE_NKPAD__",   INSTANCE_BODY.replace("{GemmSpec}", "NKPadding"))
-            .replace("__INSTANCE_MNKPAD__",  INSTANCE_BODY.replace("{GemmSpec}", "MNKPadding"))
+            INSTANCE_IMPL.replace(
+                "__INSTANCE_DEFAULT__", INSTANCE_BODY.replace("{GemmSpec}", "Default")
+            )
+            .replace(
+                "__INSTANCE_MPAD__", INSTANCE_BODY.replace("{GemmSpec}", "MPadding")
+            )
+            .replace(
+                "__INSTANCE_NPAD__", INSTANCE_BODY.replace("{GemmSpec}", "NPadding")
+            )
+            .replace(
+                "__INSTANCE_KPAD__", INSTANCE_BODY.replace("{GemmSpec}", "KPadding")
+            )
+            .replace(
+                "__INSTANCE_MNPAD__", INSTANCE_BODY.replace("{GemmSpec}", "MNPadding")
+            )
+            .replace(
+                "__INSTANCE_MKPAD__", INSTANCE_BODY.replace("{GemmSpec}", "MKPadding")
+            )
+            .replace(
+                "__INSTANCE_NKPAD__", INSTANCE_BODY.replace("{GemmSpec}", "NKPadding")
+            )
+            .replace(
+                "__INSTANCE_MNKPAD__", INSTANCE_BODY.replace("{GemmSpec}", "MNKPadding")
+            )
         )
 
         Path(os.path.join(self.impl_path, f"{k.name}.cuh")).write_text(IMPL_str)
@@ -219,14 +238,18 @@ template torch::Tensor
 
 #endif // USE_ROCM
 """
-        with open(os.path.join(self.working_path, "batched_gemm_fp8_blockscale_lookup.h"), "w") as f:
+        with open(
+            os.path.join(self.working_path, "batched_gemm_fp8_blockscale_lookup.h"), "w"
+        ) as f:
             f.write(LOOKUP_head)
             for bmnk, k in kernels_dict.items():
                 if not self.istune and isinstance(bmnk, tuple) and bmnk[0] > 0:
-                    f.write(LOOKUP_template.format(
-                        BMNK="{" + (", ").join(map(str, list(bmnk))) + "}",
-                        kernel_name=k.name,
-                    ))
+                    f.write(
+                        LOOKUP_template.format(
+                            BMNK="{" + (", ").join(map(str, list(bmnk))) + "}",
+                            kernel_name=k.name,
+                        )
+                    )
                 elif self.istune and isinstance(bmnk, int):
                     f.write(LOOKUP_template.format(BMNK=bmnk, kernel_name=k.name))
             f.write(LOOKUP_end)
@@ -259,7 +282,10 @@ torch::Tensor
 
 #endif // USE_ROCM
 """
-        with open(os.path.join(self.working_path, "batched_gemm_fp8_blockscale_manifest.h"), "w") as f:
+        with open(
+            os.path.join(self.working_path, "batched_gemm_fp8_blockscale_manifest.h"),
+            "w",
+        ) as f:
             f.write(MANIFEST_head)
             for k in _unique_instances_by_name(kernels_dict):
                 f.write(MANIFEST_template.format(kernel_name=k.name))
@@ -298,10 +324,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("-w", "--working_path", default="./", required=False)
     parser.add_argument(
-        "-f", "--tune_file",
+        "-f",
+        "--tune_file",
         default="aiter/configs/fp8_blockscale_tuned_batched_gemm.csv",
         required=False,
     )
     parser.add_argument("--tune", action="store_true", required=False)
     args = parser.parse_args()
-    batched_gemm_fp8_blockscale_codegen(args.working_path, args.tune, args.tune_file).run()
+    batched_gemm_fp8_blockscale_codegen(
+        args.working_path, args.tune, args.tune_file
+    ).run()
