@@ -97,7 +97,7 @@ def main() -> int:
 
     # Late import so the JIT build is triggered exactly once per (rebuild).
     import aiter  # noqa: F401  (ensures module_batched_gemm_fp8_blockscale_tune is JIT-built)
-    from aiter.ops._ck_batched_gemm_fp8_blockscale_loader import batched_gemm_fp8_blockscale_tune as tune_fn
+    from aiter.ops.batched_gemm_op_fp8_blockscale import batched_gemm_fp8_blockscale_tune as tune_fn
 
     cu_num = torch.cuda.get_device_properties(0).multi_processor_count
 

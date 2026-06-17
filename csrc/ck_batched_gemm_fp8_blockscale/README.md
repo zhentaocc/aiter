@@ -67,7 +67,7 @@ Wired into `aiter/jit/optCompilerConfig.json` as two modules:
 
 Both are JIT-compiled on first use of `aiter.batched_gemm_fp8_blockscale`
 or the loader entry points in
-`aiter/aiter/ops/_ck_batched_gemm_fp8_blockscale_loader.py`.
+`aiter/aiter/ops/batched_gemm_op_fp8_blockscale.py`.
 
 To pre-build:
 ```bash
@@ -99,7 +99,7 @@ AITER_REBUILD=1 python op_tests/test_batched_gemm_fp8_blockscale.py
 | Tune harness (.cu + .py) | **Written** |
 | 19 candidate tile instances | **Seeded** (same set as `ck_gemm_a8w8_blockscale`; gfx9-family validated) |
 | pybind binding + JIT config | **Wired** |
-| Python loader | **Written** (`aiter/ops/_ck_batched_gemm_fp8_blockscale_loader.py`) |
+| Python loader | **Written** (`aiter/ops/batched_gemm_op_fp8_blockscale.py`) |
 | Wrapper integration (`backend="ck"`) | **Wired** in `aiter/ops/batched_gemm_op_fp8_blockscale.py` |
 | Compile validation (hipcc) | **Not run on this host** -- requires the `rocm/atom-dev:vllm-latest` image or equivalent |
 | Tune sweep (hours of hipcc) | **Not run** -- caller's choice when to invest the time |

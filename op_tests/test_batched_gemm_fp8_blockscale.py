@@ -73,49 +73,34 @@ def _make_inputs(B, M, N, K, *, seed=0, device="cuda"):
     return A, W, A_scale, W_scale
 
 
-# wo_a-realistic shapes plus a small smoke set.  D = head_dim (128 typical),
-# but here K is the contracted dim (= D in wo_a's mapping).
+# Supported shape constraints: M >= 128 and M%128==N%128==K%128==0.
 SHAPES = [
     # (B=G, M=T, N=R, K=D)
-    (4, 1, 256, 128),
-    (4, 16, 256, 128),
     (4, 128, 256, 128),
     (8, 256, 512, 128),
-    (8, 1, 512, 256),
-    (16, 64, 512, 256),
-    # near-wo_a-real:
-    # V4-Flash: G=8, R=8192, D=4096 (per-group); too big for CI but smoke.
-    pytest.param(
-        2, 32, 8192, 4096,
-        marks=pytest.mark.slow,
-    ),
+    (8, 128, 512, 256),
+    (16, 128, 512, 256),
 ]
 
 
 # ----------------------------------------------------------------------------
 # DeepSeek V4 wo_a shape coverage.
 #
-# Real model dimensions (TP=8 sharded; N = o_lora_rank = 1024 per rank,
-# K = head_dim = 4096). G = n_local_groups: 8 for V4-Flash, 16 for V4-Pro.
-# T ∈ {1, 16, 64} covers decode hot path and small prefill chunks.
-# T ∈ {1024, 4096} covers prefill (marked slow -- skip in fast CI).
-#
-# Auto dispatch should route:
-#   - T <= 64 (or T % 128 != 0): flydsl decode kernel
-#   - T >= 128 && T % 128 == 0:  CK prefill kernel
-# Both paths must produce numerically equivalent output vs the torch oracle.
+# Real model dimensions:
+#   * N = o_lora_rank = 1024 (constant across Flash/Pro/TP)
+#   * K = heads_per_group * head_dim = 8 * 512 = 4096
+#   * B = G_per_rank: Flash o_groups=8 / Pro o_groups=16, divided by TP.
+# T (= M) covers prefill chunks (T < 128 is the decode path and is handled
+# by the decode-optimised flydsl kernel on a separate branch).
 # ----------------------------------------------------------------------------
 
 DSV4_SHAPES = [
-    # === V4-Flash (G=8) decode ===
-    pytest.param(8, 1,    1024, 4096, id="flash_decode_T=1"),
-    pytest.param(8, 16,   1024, 4096, id="flash_decode_T=16"),
-    pytest.param(8, 64,   1024, 4096, id="flash_decode_T=64"),
-    # === V4-Pro (G=16) decode ===
-    pytest.param(16, 1,   1024, 4096, id="pro_decode_T=1"),
-    pytest.param(16, 16,  1024, 4096, id="pro_decode_T=16"),
-    pytest.param(16, 64,  1024, 4096, id="pro_decode_T=64"),
-    # === Prefill (slow) ===
+    # (B, M, N, K)
+    pytest.param(8,  128,  1024, 4096, id="flash_tp1_M=128"),
+    pytest.param(8,  256,  1024, 4096, id="flash_tp1_M=256"),
+    pytest.param(16, 128,  1024, 4096, id="pro_tp1_M=128"),
+    pytest.param(16, 256,  1024, 4096, id="pro_tp1_M=256"),
+    # Prefill (slow)
     pytest.param(8,  1024, 1024, 4096, marks=pytest.mark.slow, id="flash_prefill_T=1024"),
     pytest.param(8,  4096, 1024, 4096, marks=pytest.mark.slow, id="flash_prefill_T=4096"),
     pytest.param(16, 1024, 1024, 4096, marks=pytest.mark.slow, id="pro_prefill_T=1024"),
@@ -131,7 +116,7 @@ def test_dsv4_wo_a_shapes(B, M, N, K):
 
     A, W, A_scale, W_scale = _make_inputs(B, M, N, K, seed=B * M + N + K)
     ref = _torch_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
-    out = aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, backend="auto")
+    out = aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
 
     assert out.shape == (B, M, N) and out.dtype == torch.bfloat16
     # Larger tolerance for big-K shapes (more accumulation noise).
@@ -139,45 +124,26 @@ def test_dsv4_wo_a_shapes(B, M, N, K):
     torch.testing.assert_close(out, ref, atol=atol, rtol=2e-2)
 
 
-@pytest.mark.parametrize("B,M,N,K", DSV4_SHAPES)
-def test_dsv4_dispatch_consistency(B, M, N, K):
-    """The auto backend should match the per-backend output."""
-    if not torch.cuda.is_available():
-        pytest.skip("requires CUDA/HIP device")
-
-    A, W, A_scale, W_scale = _make_inputs(B, M, N, K, seed=B * M + N + K)
-    auto_out = aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, backend="auto")
-
-    # Probe what auto picked, then run that backend explicitly and compare.
-    # CK-only branch: small-M / non-128-aligned shapes go to torch.
-    expected_backend = "ck" if (M >= 128 and M % 128 == 0 and N % 128 == 0) else "torch"
-    try:
-        explicit_out = aiter.batched_gemm_fp8_blockscale(
-            A, W, A_scale, W_scale, backend=expected_backend,
-        )
-    except (ImportError, RuntimeError, AssertionError) as e:
-        pytest.skip(f"backend {expected_backend!r} unavailable on this host: {e}")
-
-    # auto must match the explicit backend bit-for-bit (same kernel was called).
-    torch.testing.assert_close(auto_out, explicit_out, atol=0, rtol=0)
-
-
 @pytest.mark.parametrize("B,M,N,K", SHAPES)
-@pytest.mark.parametrize("backend", ["auto"])
-def test_batched_gemm_fp8_blockscale_correctness(B, M, N, K, backend):
+def test_batched_gemm_fp8_blockscale_correctness(B, M, N, K):
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA/HIP device")
 
     A, W, A_scale, W_scale = _make_inputs(B, M, N, K, seed=B * M + N + K)
-
     ref = _torch_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
-
-    out = aiter.batched_gemm_fp8_blockscale(
-        A, W, A_scale, W_scale, backend=backend,
-    )
+    out = aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
 
     assert out.shape == (B, M, N) and out.dtype == torch.bfloat16
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+
+
+def test_unsupported_shape_raises():
+    """Shapes outside (M>=128, M%128==N%128==K%128==0) must raise ValueError."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA/HIP device")
+    A, W, A_scale, W_scale = _make_inputs(2, 64, 256, 128, seed=0)  # M=64 < 128
+    with pytest.raises(ValueError, match="unsupported shape"):
+        aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
 
 
 if __name__ == "__main__":

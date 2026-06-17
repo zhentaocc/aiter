@@ -2,80 +2,106 @@
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Public entry point for FP8 block-wise batched GEMM.
+Public entry point for the CK FP8 block-wise batched GEMM kernel.
 
 This is the kernel that DeepSeek V4's ``wo_a`` projection needs (and that
-sglang PR #23608 currently sources from ``deep_gemm.fp8_einsum``).  Mirrors
+sglang PR #23608 currently sources from ``deep_gemm.fp8_einsum``). Mirrors
 the contract of:
 
     deep_gemm.fp8_einsum("bmk,bnk->bmn", (A, A_scale), (W, W_scale), out,
                          recipe=(1, 1, 128))
 
-Backend selection (this branch ships the CK path only; the decode-optimised
-flydsl kernel is on the ``wo_a_fp8_blockwise`` branch):
+Shape constraints: ``M >= 128 && M % 128 == 0 && N % 128 == 0 && K % 128 == 0``.
+Shapes outside that envelope raise ``ValueError``; callers are responsible
+for routing such shapes elsewhere (e.g. the decode-optimised flydsl kernel
+on the ``wo_a_fp8_blockwise`` branch).
 
-  * ``"auto"``   -> CK when M >= 128 && M % 128 == 0 && N % 128 == 0,
-                    else torch reference. Empirically validated on DSv4
-                    wo_a: CK wins from M=4096+ (1.4-1.7x over flydsl).
-  * ``"ck"``     -> CK FP8 block-wise batched GEMM (prefill-optimized).
-  * ``"torch"``  -> reference dequant + ``torch.bmm`` in bf16, the
-                    correctness oracle.
+Scale dtype: ``A_scale`` and ``W_scale`` must share dtype, either ``fp32`` or
+``uint8`` UE8M0. uint8 scales are converted to fp32 on the GPU before the
+CK call (CK's template requires fp32); ``W_scale`` conversion is cached
+via a weakref keyed on ``id(W_scale)`` so weights pay the ~10-50us cast
+exactly once per tensor lifetime.
 """
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+import weakref as _weakref
+from typing import Optional
 
 import torch
 
 from aiter import logger as _aiter_logger
+from aiter.jit.core import compile_ops
 
 logger = _aiter_logger
 _log = logger.getChild("batched_gemm_fp8_blockscale")
 
 
-Backend = Literal["auto", "ck", "torch"]
-
-# Once the CK loader fails, remember it so we don't re-pay the import cost
-# (and the warning spam) on every call.
-_CK_BROKEN: bool = False
-
-# CK shape constraints. Below this M (or when M % 128 != 0 / N % 128 != 0)
-# we fall back to the torch reference. The flydsl decode-optimised path
-# lives on a separate branch (wo_a_fp8_blockwise) and is not built here.
-_AUTO_CK_THRESHOLD_M = 128
-
-
 # ----------------------------------------------------------------------------
-# Runtime fallback (dequant + bf16 bmm). Used when CK loading fails or when
-# the user explicitly passes ``backend="torch"``. The test-only correctness
-# oracle of the same semantics lives in ``op_tests/test_batched_gemm_fp8_blockscale.py``.
+# JIT-compiled CK kernel bindings.
 # ----------------------------------------------------------------------------
 
-
-def _torch_fallback(
-    A: torch.Tensor,
-    W: torch.Tensor,
-    A_scale: torch.Tensor,
-    W_scale: torch.Tensor,
+def _gen_fake_out(
+    XQ: torch.Tensor,
+    WQ: torch.Tensor,
+    x_scale: torch.Tensor,
+    w_scale: torch.Tensor,
+    Out: torch.Tensor,
 ) -> torch.Tensor:
-    B, M, K = A.shape
-    Bw, N, Kw = W.shape
-    assert B == Bw and K == Kw
-    K_g = K // 128
-    N_g = N // 128
-    assert A_scale.shape == (B, M, K_g)
-    assert W_scale.shape == (B, N_g, K_g)
+    return Out
 
-    # Dequant A: per-row, per-128k-block.
-    a_dq = A.to(torch.float32).view(B, M, K_g, 128) * A_scale.unsqueeze(-1)
-    a_dq = a_dq.view(B, M, K).to(torch.bfloat16)
 
-    # Dequant W: per (128n, 128k) block.
-    w_dq = W.to(torch.float32).view(B, N_g, 128, K_g, 128) * W_scale.view(B, N_g, 1, K_g, 1)
-    w_dq = w_dq.view(B, N, K).to(torch.bfloat16)
+@compile_ops("module_batched_gemm_fp8_blockscale", fc_name="batched_gemm_fp8_blockscale",
+             gen_fake=_gen_fake_out)
+def _batched_gemm_fp8_blockscale(
+    XQ: torch.Tensor,
+    WQ: torch.Tensor,
+    x_scale: torch.Tensor,
+    w_scale: torch.Tensor,
+    Out: torch.Tensor,
+) -> torch.Tensor: ...
 
-    return torch.bmm(a_dq, w_dq.transpose(1, 2)).to(torch.bfloat16)
+
+@compile_ops("module_batched_gemm_fp8_blockscale_tune", fc_name="batched_gemm_fp8_blockscale_tune",
+             gen_fake=lambda XQ, WQ, x_scale, w_scale, Out, kernelId, splitK=0: Out)
+def batched_gemm_fp8_blockscale_tune(
+    XQ: torch.Tensor,
+    WQ: torch.Tensor,
+    x_scale: torch.Tensor,
+    w_scale: torch.Tensor,
+    Out: torch.Tensor,
+    kernelId: int,
+    splitK: int = 0,
+) -> torch.Tensor: ...
+
+
+# ----------------------------------------------------------------------------
+# uint8 UE8M0 -> fp32 scale conversion. CK's host check rejects non-fp32
+# scales; for callers that hold u8 scales (e.g. weights pre-converted at
+# model load time), do the one-way reverse conversion here. Result is
+# CACHED so subsequent calls with the same u8 tensor reuse the converted
+# fp32 view (zero overhead in the hot loop).
+# ----------------------------------------------------------------------------
+
+# Keyed by id(u8_tensor); values are weakrefs so converted scales auto-evict
+# when the source weight scale tensor is freed.
+_U8_TO_FP32_CACHE: "dict[int, _weakref.ReferenceType[torch.Tensor]]" = {}
+
+
+def _ue8m0_to_fp32(scales_u8: torch.Tensor) -> torch.Tensor:
+    """uint8 UE8M0 -> fp32 multiplicative scales (cached by tensor id)."""
+    if scales_u8.dtype == torch.float32:
+        return scales_u8
+    key = id(scales_u8)
+    cached_ref = _U8_TO_FP32_CACHE.get(key)
+    cached = cached_ref() if cached_ref is not None else None
+    if cached is not None and cached.device == scales_u8.device:
+        return cached
+    # scale[i] = 2 ** (u8[i] - 127); u8=0 -> 2^(-127) (effectively zero).
+    fp32 = torch.exp2((scales_u8.to(torch.float32) - 127.0))
+    fp32 = fp32.contiguous()
+    _U8_TO_FP32_CACHE[key] = _weakref.ref(fp32)
+    return fp32
 
 
 # ----------------------------------------------------------------------------
@@ -90,7 +116,6 @@ def batched_gemm_fp8_blockscale(
     W_scale: torch.Tensor,
     *,
     out: Optional[torch.Tensor] = None,
-    backend: Backend = "auto",
 ) -> torch.Tensor:
     """
     FP8 block-wise batched GEMM:  ``Out[b, m, n] = sum_k A[b, m, k] * W[b, n, k]``.
@@ -98,48 +123,47 @@ def batched_gemm_fp8_blockscale(
     Args:
         A:        ``[B, M, K]`` ``fp8_e4m3fn``.
         W:        ``[B, N, K]`` ``fp8_e4m3fn``.
-        A_scale:  ``[B, M, K // 128]`` ``fp32`` or ``uint8`` (UE8M0) --
-                  per-row, per-128k-block.
-        W_scale:  ``[B, N // 128, K // 128]`` ``fp32`` or ``uint8`` (UE8M0) --
-                  per 128x128 block. Must share dtype with ``A_scale``.
+        A_scale:  ``[B, M, K // 128]`` ``fp32`` or ``uint8`` (UE8M0).
+        W_scale:  ``[B, N // 128, K // 128]`` ``fp32`` or ``uint8`` (UE8M0).
+                  Must share dtype with ``A_scale``.
         out:      Optional pre-allocated ``[B, M, N]`` ``bfloat16`` output.
-        backend:  ``"auto" | "ck" | "torch"``.  Default ``"auto"``.
 
     Returns:
         ``Out[B, M, N] bfloat16``.
 
-    Notes:
-        * ``K`` and ``N`` must be multiples of 128.
-        * Mirrors ``deep_gemm.fp8_einsum("bmk,bnk->bmn", (A, A_scale),
-          (W, W_scale), out, recipe=(1, 1, 128))`` exactly.
+    Raises:
+        ValueError: M/N/K shape constraints not satisfied, or A_scale and
+            W_scale dtypes don't match.
+        TypeError:  scale dtype is not torch.float32 or torch.uint8.
+        ImportError / RuntimeError: CK kernel cannot be loaded.
     """
-    global _CK_BROKEN
-    chosen = backend
-    if chosen == "auto":
-        # CK is the only optimized backend on this branch; fall to torch for
-        # shapes CK cannot handle (M < 128 or N/M not multiple of 128).
-        _, M, _ = A.shape
-        N = W.shape[1]
-        if (M >= _AUTO_CK_THRESHOLD_M and M % 128 == 0 and N % 128 == 0
-                and not _CK_BROKEN):
-            chosen = "ck"
-        else:
-            chosen = "torch"
+    _, M, K = A.shape
+    N = W.shape[1]
+    if M < 128 or M % 128 != 0 or N % 128 != 0 or K % 128 != 0:
+        raise ValueError(
+            f"batched_gemm_fp8_blockscale: unsupported shape "
+            f"(B={A.shape[0]}, M={M}, N={N}, K={K}); requires M>=128 and "
+            f"M%128==N%128==K%128==0."
+        )
+    if A_scale.dtype != W_scale.dtype:
+        raise ValueError(
+            f"batched_gemm_fp8_blockscale: A_scale.dtype ({A_scale.dtype}) "
+            f"and W_scale.dtype ({W_scale.dtype}) must match -- pass both as "
+            f"torch.float32 or both as torch.uint8 (UE8M0)."
+        )
+    if A_scale.dtype not in (torch.float32, torch.uint8):
+        raise TypeError(
+            f"batched_gemm_fp8_blockscale: scale dtype must be torch.float32 "
+            f"or torch.uint8; got {A_scale.dtype}."
+        )
 
-    if chosen == "ck":
-        if not _CK_BROKEN:
-            try:
-                from aiter.ops._ck_batched_gemm_fp8_blockscale_loader import ck_batched_gemm_fp8_blockscale
-                return ck_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out=out)
-            except (ImportError, NotImplementedError, RuntimeError) as e:
-                _log.warning(
-                    "CK batched_gemm_fp8_blockscale unavailable (%s); "
-                    "falling back to torch reference (silent for subsequent calls).", e,
-                )
-                _CK_BROKEN = True
+    if out is None:
+        out = torch.empty((A.shape[0], M, N), dtype=torch.bfloat16, device=A.device)
 
-    out_ref = _torch_fallback(A, W, A_scale, W_scale)
-    if out is not None:
-        out.copy_(out_ref)
-        return out
-    return out_ref
+    # CK kernel requires fp32 scales. Convert if needed (W_scale cached).
+    if A_scale.dtype == torch.uint8:
+        A_scale = _ue8m0_to_fp32(A_scale)
+        W_scale = _ue8m0_to_fp32(W_scale)
+
+    _batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out)
+    return out

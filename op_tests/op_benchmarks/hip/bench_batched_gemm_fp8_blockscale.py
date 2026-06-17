@@ -16,8 +16,6 @@ Usage:
     # Save results to CSV
     python bench_batched_gemm_fp8_blockscale.py --preset dsv4 -o results.csv
 
-    # Force a backend / scale dtype
-    python bench_batched_gemm_fp8_blockscale.py --preset smoke --backend ck
 """
 
 from __future__ import annotations
@@ -83,7 +81,7 @@ def _make_inputs(B, M, N, K, *, seed=0):
 # Per-shape bench.
 # -----------------------------------------------------------------------------
 
-def bench_one(B, M, N, K, *, backend, warmup, rep, accuracy):
+def bench_one(B, M, N, K, *, warmup, rep, accuracy):
     A, W, A_scale, W_scale = _make_inputs(B, M, N, K, seed=B * 10007 + M * 101 + N + K)
     Y = torch.empty((B, M, N), dtype=torch.bfloat16, device=DEVICE)
 
@@ -92,14 +90,13 @@ def bench_one(B, M, N, K, *, backend, warmup, rep, accuracy):
     rel_err = float("nan")
     if accuracy:
         ref = _torch_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
-        out = aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, backend=backend)
+        out = aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
         diff = (out.float() - ref.float()).abs()
         max_err = diff.max().item()
         rel_err = max_err / max(ref.float().abs().max().item(), 1e-6)
 
     # CK kernel timing.
-    fn = lambda: aiter.batched_gemm_fp8_blockscale(
-        A, W, A_scale, W_scale, out=Y, backend=backend)
+    fn = lambda: aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out=Y)
     ms, p20, p80 = triton.testing.do_bench(
         fn, warmup=warmup, rep=rep, quantiles=[0.5, 0.2, 0.8])
 
@@ -126,8 +123,7 @@ def bench_one(B, M, N, K, *, backend, warmup, rep, accuracy):
 def run_single_benchmark(args):
     B, M, N, K = args.shape
     print(f"\nBenchmarking batched_gemm_fp8_blockscale: B={B} M={M} N={N} K={K}\n")
-    r = bench_one(B, M, N, K, backend=args.backend,
-                  warmup=args.warmup, rep=args.rep,
+    r = bench_one(B, M, N, K, warmup=args.warmup, rep=args.rep,
                   accuracy=not args.no_accuracy)
     print("Results:")
     print(f"  Median latency: {r['median_ms']:.4f} ms")
@@ -153,7 +149,7 @@ def run_sweep_benchmark(args):
         shapes = list(itertools.product(batches, ms, ns, ks))
 
     print(f"\nRunning sweep across {len(shapes)} shapes "
-          f"(preset={args.preset or 'custom'}, backend={args.backend})\n")
+          f"(preset={args.preset or 'custom'})\n")
 
     header = (f"{'B':>4} {'M':>5} {'N':>5} {'K':>5} "
               f"{'median_ms':>10} {'p20_ms':>9} {'p80_ms':>9} "
@@ -164,8 +160,7 @@ def run_sweep_benchmark(args):
     results = []
     for B, M, N, K in shapes:
         try:
-            r = bench_one(B, M, N, K, backend=args.backend,
-                          warmup=args.warmup, rep=args.rep,
+            r = bench_one(B, M, N, K, warmup=args.warmup, rep=args.rep,
                           accuracy=not args.no_accuracy)
         except Exception as e:
             print(f"{B:>4} {M:>5} {N:>5} {K:>5}  FAIL: {e}")
@@ -215,7 +210,6 @@ def parse_args():
                    help=f"Custom N sweep (default: [{DSV4_N}]).")
     p.add_argument("--ks", type=int, nargs="+",
                    help=f"Custom K sweep (default: [{DSV4_K}]).")
-    p.add_argument("--backend", choices=["auto", "ck", "torch"], default="auto")
     p.add_argument("--no-accuracy", action="store_true",
                    help="Skip torch-oracle accuracy check (faster on big M).")
     p.add_argument("--warmup", type=int, default=25)
