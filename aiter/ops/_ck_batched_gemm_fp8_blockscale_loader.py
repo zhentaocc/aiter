@@ -70,7 +70,7 @@ def _ue8m0_to_fp32(scales_u8: torch.Tensor) -> torch.Tensor:
     """uint8 UE8M0 -> fp32 multiplicative scales.
 
     CK's host check rejects non-fp32 scales. For callers that hold u8
-    scales (post load-time convert_scales_to_ue8m0), do the one-way
+    scales (e.g. weights pre-converted at model load time), do the one-way
     reverse conversion here. Result is CACHED so subsequent calls with
     the same u8 tensor reuse the converted fp32 view (zero overhead in
     the hot loop).

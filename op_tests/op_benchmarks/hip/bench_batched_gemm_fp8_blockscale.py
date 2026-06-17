@@ -17,7 +17,7 @@ Usage:
     python bench_batched_gemm_fp8_blockscale.py --preset dsv4 -o results.csv
 
     # Force a backend / scale dtype
-    python bench_batched_gemm_fp8_blockscale.py --preset smoke --backend ck --scale-dtype u8
+    python bench_batched_gemm_fp8_blockscale.py --preset smoke --backend ck
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ import torch
 import triton
 
 import aiter
-from aiter.ops.batched_gemm_op_fp8_blockscale import convert_scales_to_ue8m0
 # Torch oracle lives next to the correctness test (not in the production
 # dispatcher module).
 from op_tests.test_batched_gemm_fp8_blockscale import (
@@ -68,7 +67,7 @@ PRESETS = {
 # Input helpers.
 # -----------------------------------------------------------------------------
 
-def _make_inputs(B, M, N, K, *, seed=0, scale_dtype=torch.uint8):
+def _make_inputs(B, M, N, K, *, seed=0):
     g = torch.Generator(device=DEVICE).manual_seed(seed)
     A = (torch.randn(B, M, K, generator=g, device=DEVICE, dtype=torch.float32) * 0.5
          ).clamp(-8.0, 8.0).to(torch.float8_e4m3fn)
@@ -77,31 +76,22 @@ def _make_inputs(B, M, N, K, *, seed=0, scale_dtype=torch.uint8):
     K_g, N_g = K // 128, N // 128
     A_scale = torch.rand(B, M, K_g, generator=g, device=DEVICE, dtype=torch.float32) * 0.1 + 0.01
     W_scale = torch.rand(B, N_g, K_g, generator=g, device=DEVICE, dtype=torch.float32) * 0.1 + 0.01
-    if scale_dtype == torch.uint8:
-        A_scale = convert_scales_to_ue8m0(A_scale)
-        W_scale = convert_scales_to_ue8m0(W_scale)
     return A, W, A_scale, W_scale
-
-
-def _u8_to_fp32(s):
-    return torch.exp2((s.float() - 127.0)) if s.dtype == torch.uint8 else s
 
 
 # -----------------------------------------------------------------------------
 # Per-shape bench.
 # -----------------------------------------------------------------------------
 
-def bench_one(B, M, N, K, *, backend, scale_dtype, warmup, rep, accuracy):
-    A, W, A_scale, W_scale = _make_inputs(B, M, N, K, seed=B * 10007 + M * 101 + N + K,
-                                          scale_dtype=scale_dtype)
+def bench_one(B, M, N, K, *, backend, warmup, rep, accuracy):
+    A, W, A_scale, W_scale = _make_inputs(B, M, N, K, seed=B * 10007 + M * 101 + N + K)
     Y = torch.empty((B, M, N), dtype=torch.bfloat16, device=DEVICE)
 
-    # Accuracy vs torch oracle (uses fp32 scales).
+    # Accuracy vs torch oracle (same fp32 scales).
     max_err = float("nan")
     rel_err = float("nan")
     if accuracy:
-        A_s_ref, W_s_ref = _u8_to_fp32(A_scale), _u8_to_fp32(W_scale)
-        ref = _torch_batched_gemm_fp8_blockscale(A, W, A_s_ref, W_s_ref)
+        ref = _torch_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
         out = aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, backend=backend)
         diff = (out.float() - ref.float()).abs()
         max_err = diff.max().item()
@@ -137,7 +127,6 @@ def run_single_benchmark(args):
     B, M, N, K = args.shape
     print(f"\nBenchmarking batched_gemm_fp8_blockscale: B={B} M={M} N={N} K={K}\n")
     r = bench_one(B, M, N, K, backend=args.backend,
-                  scale_dtype=torch.uint8 if args.scale_dtype == "u8" else torch.float32,
                   warmup=args.warmup, rep=args.rep,
                   accuracy=not args.no_accuracy)
     print("Results:")
@@ -164,8 +153,7 @@ def run_sweep_benchmark(args):
         shapes = list(itertools.product(batches, ms, ns, ks))
 
     print(f"\nRunning sweep across {len(shapes)} shapes "
-          f"(preset={args.preset or 'custom'}, backend={args.backend}, "
-          f"scale={args.scale_dtype})\n")
+          f"(preset={args.preset or 'custom'}, backend={args.backend})\n")
 
     header = (f"{'B':>4} {'M':>5} {'N':>5} {'K':>5} "
               f"{'median_ms':>10} {'p20_ms':>9} {'p80_ms':>9} "
@@ -177,7 +165,6 @@ def run_sweep_benchmark(args):
     for B, M, N, K in shapes:
         try:
             r = bench_one(B, M, N, K, backend=args.backend,
-                          scale_dtype=torch.uint8 if args.scale_dtype == "u8" else torch.float32,
                           warmup=args.warmup, rep=args.rep,
                           accuracy=not args.no_accuracy)
         except Exception as e:
@@ -229,8 +216,6 @@ def parse_args():
     p.add_argument("--ks", type=int, nargs="+",
                    help=f"Custom K sweep (default: [{DSV4_K}]).")
     p.add_argument("--backend", choices=["auto", "ck", "torch"], default="auto")
-    p.add_argument("--scale-dtype", choices=["u8", "fp32"], default="u8",
-                   help="Scale dtype passed to the kernel.")
     p.add_argument("--no-accuracy", action="store_true",
                    help="Skip torch-oracle accuracy check (faster on big M).")
     p.add_argument("--warmup", type=int, default=25)

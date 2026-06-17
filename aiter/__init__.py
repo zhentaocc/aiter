@@ -148,8 +148,6 @@ except (ImportError, AttributeError):
 try:
     from .ops.batched_gemm_op_fp8_blockscale import (  # noqa: F401
         batched_gemm_fp8_blockscale,
-        batched_gemm_fp8_blockscale_einsum,
-        convert_scales_to_ue8m0,
     )
 except ImportError as _bgfp8_e:
     logger.debug("batched_gemm_fp8_blockscale wrapper not available: %s", _bgfp8_e)
