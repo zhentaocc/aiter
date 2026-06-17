@@ -33,7 +33,7 @@ import torch
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _THIS_DIR)
 
-from batched_gemm_fp8_blockscale_instance import candidate_kernels_dict
+from batched_gemm_fp8_blockscale_instance import candidate_kernels_dict  # noqa: E402
 
 
 def _torch_oracle(XQ, WQ, x_scale, w_scale) -> torch.Tensor:
@@ -84,7 +84,7 @@ def _bench_one(tune_fn, A, W, A_s, W_s, kid: int, *, iters=20, warmup=5) -> floa
     ref = _torch_oracle(A, W, A_s, W_s)
     try:
         tune_fn(A, W, A_s, W_s, Y, kid, 0)
-    except Exception as e:
+    except Exception:
         return float("inf")
     err = (Y.float() - ref.float()).abs().max().item() / max(
         ref.float().abs().max().item(), 1e-6
