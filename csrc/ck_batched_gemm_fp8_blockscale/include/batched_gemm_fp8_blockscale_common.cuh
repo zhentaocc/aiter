@@ -152,8 +152,7 @@ __forceinline__ torch::Tensor batched_gemm_fp8_blockscale_impl(torch::Tensor& XQ
                                                               torch::Tensor& WQ,
                                                               torch::Tensor& x_scale,
                                                               torch::Tensor& w_scale,
-                                                              torch::Tensor& Y,
-                                                              int KBatch = 1)
+                                                              torch::Tensor& Y)
 {
     const int B = XQ.size(0);
     const int M = XQ.size(1);
@@ -213,12 +212,6 @@ __forceinline__ torch::Tensor batched_gemm_fp8_blockscale_impl(torch::Tensor& XQ
             x_scale_ptr + b * x_scale_b_stride,
             w_scale_ptr + b * w_scale_b_stride,
             a_element_op, b_element_op, cde_element_op);
-
-        // splitK: this CK version (rocm-7.1.1 system headers) does NOT expose
-        // SetKBatch() on DeviceGemmMultiD_ABScale_Xdl_CShuffle_V3. Newer CK
-        // adds it, but until we vendor the newer CK with gfx950 f8_ocp_t
-        // support we silently fall back to KBatch=1. Tracked as TODO.
-        (void)KBatch;
 
         TORCH_CHECK(device_gemm.IsSupportedArgument(argument),
                     "FP8 block-wise batched GEMM: unsupported argument for tile config");

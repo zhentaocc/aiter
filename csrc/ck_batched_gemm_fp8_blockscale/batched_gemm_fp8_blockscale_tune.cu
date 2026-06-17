@@ -11,7 +11,7 @@
 #include <cmath>
 
 using BatchedBlockscaleKernel = std::function<torch::Tensor(
-    torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&, int)>;
+    torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&)>;
 
 using BatchedBlockscaleKernelMap = std::unordered_map<int, BatchedBlockscaleKernel>;
 
@@ -22,14 +22,12 @@ torch::Tensor batched_gemm_fp8_blockscale_tune(torch::Tensor& XQ,
                                               torch::Tensor& w_scale,
                                               torch::Tensor& Y,
                                               int kernelId,
-                                              int splitK) {
+                                              int /*splitK*/) {
     static const BatchedBlockscaleKernelMap lookup{GENERATE_LOOKUP_TABLE(DDataType, EDataType)};
     auto it = lookup.find(kernelId);
     TORCH_CHECK(it != lookup.end(),
                 "FP8 block-wise batched GEMM tune: unknown kernelId ", kernelId);
-    // splitK == 0 means "no split" (treated as KBatch=1); >= 1 sets that KBatch.
-    const int kbatch = splitK <= 1 ? 1 : splitK;
-    return it->second(XQ, WQ, x_scale, w_scale, Y, kbatch);
+    return it->second(XQ, WQ, x_scale, w_scale, Y);
 }
 
 torch::Tensor batched_gemm_fp8_blockscale_tune(torch::Tensor& XQ,

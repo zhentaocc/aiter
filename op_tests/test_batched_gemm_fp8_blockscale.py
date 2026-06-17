@@ -5,8 +5,8 @@
 Correctness tests for ``aiter.batched_gemm_fp8_blockscale``.
 
 Reference oracle: torch dequant + ``torch.bmm`` (the
-``_torch_batched_gemm_fp8_blockscale`` function in the wrapper module).
-That oracle is itself the verbatim semantics of DeepGEMM's
+``_torch_batched_gemm_fp8_blockscale`` helper defined below). That oracle
+is the verbatim semantics of DeepGEMM's
 ``fp8_einsum("bmk,bnk->bmn", ..., recipe=(1, 1, 128))``.
 
 Tolerance: BF16 GEMM with FP8 inputs has ~1e-2 absolute / ~1e-2 relative
@@ -24,7 +24,53 @@ import pytest
 import torch
 
 import aiter
-from aiter.ops.batched_gemm_op_fp8_blockscale import _torch_batched_gemm_fp8_blockscale
+from aiter.ops.batched_gemm_op_fp8_blockscale import _parse_bmnk
+
+
+# ----------------------------------------------------------------------------
+# Torch reference oracle: dequant + bf16 bmm. Verbatim semantics of DeepGEMM's
+# ``fp8_einsum("bmk,bnk->bmn", ..., recipe=(1, 1, 128))``. Used by every
+# accuracy test below and by the benchmark in
+# ``op_tests/op_benchmarks/hip/bench_batched_gemm_fp8_blockscale.py``.
+# ----------------------------------------------------------------------------
+
+
+def _torch_batched_gemm_fp8_blockscale(
+    A: torch.Tensor,
+    W: torch.Tensor,
+    A_scale: torch.Tensor,
+    W_scale: torch.Tensor,
+) -> torch.Tensor:
+    B, M, K = A.shape
+    Bw, N, Kw = W.shape
+    assert B == Bw and K == Kw
+    K_g = K // 128
+    N_g = N // 128
+    assert A_scale.shape == (B, M, K_g)
+    assert W_scale.shape == (B, N_g, K_g)
+    a_dq = A.to(torch.float32).view(B, M, K_g, 128) * A_scale.unsqueeze(-1)
+    a_dq = a_dq.view(B, M, K).to(torch.bfloat16)
+    w_dq = W.to(torch.float32).view(B, N_g, 128, K_g, 128) * W_scale.view(B, N_g, 1, K_g, 1)
+    w_dq = w_dq.view(B, N, K).to(torch.bfloat16)
+    return torch.bmm(a_dq, w_dq.transpose(1, 2)).to(torch.bfloat16)
+
+
+def _torch_batched_gemm_fp8_blockscale_einsum(
+    equation: str,
+    A: torch.Tensor,
+    A_scale: torch.Tensor,
+    W: torch.Tensor,
+    W_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Einsum-form oracle (wraps the canonical BMK reference)."""
+    info = _parse_bmnk(equation)
+    A_bmk = A.permute(*info["a_perm"]).contiguous()
+    W_bnk = W.permute(*info["w_perm"]).contiguous()
+    A_scale_bmk = A_scale.permute(*info["a_perm"]).contiguous()
+    W_scale_bnk = W_scale.permute(*info["w_perm"]).contiguous()
+    out_bmn = _torch_batched_gemm_fp8_blockscale(A_bmk, W_bnk, A_scale_bmk, W_scale_bnk)
+    inv_o = [info["o_perm"].index(i) for i in range(3)]
+    return out_bmn.permute(*inv_o).contiguous()
 
 
 def _make_fp8(shape, *, generator, device="cuda") -> torch.Tensor:
@@ -242,9 +288,6 @@ def test_einsum_form_matches_oracle(equation, A_shape, W_shape, O_shape, backend
     """einsum-form output must match the torch dequant+bmm oracle."""
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA/HIP device")
-    from aiter.ops.batched_gemm_op_fp8_blockscale import (
-        _torch_batched_gemm_fp8_blockscale_einsum,
-    )
 
     g = torch.Generator(device="cuda").manual_seed(hash(equation) & 0xFFFF)
     A = (torch.randn(*A_shape, generator=g, device="cuda", dtype=torch.float32) * 0.5).clamp(-8, 8).to(torch.float8_e4m3fn)

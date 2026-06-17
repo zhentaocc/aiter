@@ -58,12 +58,12 @@ def _make(B, M, N, K, *, seed=0, device="cuda"):
     return A, W, A_s, W_s
 
 
-def _bench_one(tune_fn, A, W, A_s, W_s, kid: int, splitK: int, *, iters=20, warmup=5) -> float:
+def _bench_one(tune_fn, A, W, A_s, W_s, kid: int, *, iters=20, warmup=5) -> float:
     Y = torch.empty((A.size(0), A.size(1), W.size(1)), dtype=torch.bfloat16, device=A.device)
     # Correctness check first.
     ref = _torch_oracle(A, W, A_s, W_s)
     try:
-        tune_fn(A, W, A_s, W_s, Y, kid, splitK)
+        tune_fn(A, W, A_s, W_s, Y, kid, 0)
     except Exception as e:
         return float("inf")
     err = (Y.float() - ref.float()).abs().max().item() / max(ref.float().abs().max().item(), 1e-6)
@@ -71,12 +71,12 @@ def _bench_one(tune_fn, A, W, A_s, W_s, kid: int, splitK: int, *, iters=20, warm
         return float("inf")
     # Time.
     for _ in range(warmup):
-        tune_fn(A, W, A_s, W_s, Y, kid, splitK)
+        tune_fn(A, W, A_s, W_s, Y, kid, 0)
     torch.cuda.synchronize()
     samples = []
     for _ in range(iters):
         t0 = time.perf_counter_ns()
-        tune_fn(A, W, A_s, W_s, Y, kid, splitK)
+        tune_fn(A, W, A_s, W_s, Y, kid, 0)
         torch.cuda.synchronize()
         samples.append((time.perf_counter_ns() - t0) / 1e3)
     samples.sort()
@@ -101,40 +101,34 @@ def main() -> int:
 
     cu_num = torch.cuda.get_device_properties(0).multi_processor_count
 
-    # splitK is plumbed but the system CK (rocm-7.1.1) lacks SetKBatch on the
-    # ABScale_V3 device class, so KBatch always falls back to 1. Keep only
-    # splitK=1 to skip redundant tuning; expand once vendored CK is updated.
-    SPLIT_K_CANDIDATES = (1,)
     df_in = pd.read_csv(args.input_file)
     rows = []
     profile_rows = []
     for _, row in df_in.iterrows():
         B, M, N, K = int(row["B"]), int(row["M"]), int(row["N"]), int(row["K"])
         A, W, A_s, W_s = _make(B, M, N, K, seed=B * M + N + K)
-        best_kid, best_sk, best_us = -1, 1, float("inf")
-        valid_sks = [sk for sk in SPLIT_K_CANDIDATES if K % (128 * sk) == 0]
+        best_kid, best_us = -1, float("inf")
         for kid in candidate_kernels_dict.keys():
-            for sk in valid_sks:
-                us = _bench_one(tune_fn, A, W, A_s, W_s, kid, sk, iters=args.iters)
-                profile_rows.append({
-                    "cu_num": cu_num, "libtype": "ck",
-                    "B": B, "M": M, "N": N, "K": K,
-                    "kernelId": kid, "splitK": sk, "us": us,
-                    "kernelName": candidate_kernels_dict[kid].name,
-                })
-                if us < best_us:
-                    best_us, best_kid, best_sk = us, kid, sk
-                print(f"[tune] B={B} M={M} N={N} K={K} kid={kid:2d} splitK={sk} us={us:.2f}")
+            us = _bench_one(tune_fn, A, W, A_s, W_s, kid, iters=args.iters)
+            profile_rows.append({
+                "cu_num": cu_num, "libtype": "ck",
+                "B": B, "M": M, "N": N, "K": K,
+                "kernelId": kid, "splitK": 0, "us": us,
+                "kernelName": candidate_kernels_dict[kid].name,
+            })
+            if us < best_us:
+                best_us, best_kid = us, kid
+            print(f"[tune] B={B} M={M} N={N} K={K} kid={kid:2d} us={us:.2f}")
         flops = 2 * B * M * N * K
         tflops = flops / (best_us * 1e-6) / 1e12 if best_us != float("inf") else 0.0
         rows.append({
             "cu_num": cu_num, "libtype": "ck",
             "B": B, "M": M, "N": N, "K": K,
-            "kernelId": best_kid, "splitK": best_sk, "us": best_us,
+            "kernelId": best_kid, "splitK": 0, "us": best_us,
             "kernelName": candidate_kernels_dict[best_kid].name if best_kid >= 0 else "",
             "tflops": tflops,
         })
-        print(f"[best] B={B} M={M} N={N} K={K} -> kid={best_kid} splitK={best_sk} us={best_us:.2f} ({tflops:.1f} TFLOPs)")
+        print(f"[best] B={B} M={M} N={N} K={K} -> kid={best_kid} us={best_us:.2f} ({tflops:.1f} TFLOPs)")
 
     out = pd.DataFrame(rows)
     if args.sort:

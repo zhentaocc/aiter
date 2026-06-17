@@ -99,12 +99,13 @@ def convert_scales_to_ue8m0(scales: torch.Tensor) -> torch.Tensor:
 
 
 # ----------------------------------------------------------------------------
-# Reference implementation (correctness oracle).  Verbatim semantics of
-# DeepGEMM's fp8_einsum with recipe=(1, 1, 128).
+# Runtime fallback (dequant + bf16 bmm). Used when CK loading fails or when
+# the user explicitly passes ``backend="torch"``. The test-only correctness
+# oracle of the same semantics lives in ``op_tests/test_batched_gemm_fp8_blockscale.py``.
 # ----------------------------------------------------------------------------
 
 
-def _torch_batched_gemm_fp8_blockscale(
+def _torch_fallback(
     A: torch.Tensor,
     W: torch.Tensor,
     A_scale: torch.Tensor,
@@ -119,13 +120,11 @@ def _torch_batched_gemm_fp8_blockscale(
     assert W_scale.shape == (B, N_g, K_g)
 
     # Dequant A: per-row, per-128k-block.
-    a_f32 = A.to(torch.float32)
-    a_dq = a_f32.view(B, M, K_g, 128) * A_scale.unsqueeze(-1)  # broadcast scale across the 128-block
+    a_dq = A.to(torch.float32).view(B, M, K_g, 128) * A_scale.unsqueeze(-1)
     a_dq = a_dq.view(B, M, K).to(torch.bfloat16)
 
     # Dequant W: per (128n, 128k) block.
-    w_f32 = W.to(torch.float32).view(B, N_g, 128, K_g, 128)
-    w_dq = w_f32 * W_scale.view(B, N_g, 1, K_g, 1)
+    w_dq = W.to(torch.float32).view(B, N_g, 128, K_g, 128) * W_scale.view(B, N_g, 1, K_g, 1)
     w_dq = w_dq.view(B, N, K).to(torch.bfloat16)
 
     return torch.bmm(a_dq, w_dq.transpose(1, 2)).to(torch.bfloat16)
@@ -193,7 +192,7 @@ def batched_gemm_fp8_blockscale(
                 )
                 _CK_BROKEN = True
 
-    out_ref = _torch_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
+    out_ref = _torch_fallback(A, W, A_scale, W_scale)
     if out is not None:
         out.copy_(out_ref)
         return out
@@ -345,19 +344,3 @@ def batched_gemm_fp8_blockscale_einsum(
     return out
 
 
-def _torch_batched_gemm_fp8_blockscale_einsum(
-    equation: str,
-    A: torch.Tensor,
-    A_scale: torch.Tensor,
-    W: torch.Tensor,
-    W_scale: torch.Tensor,
-) -> torch.Tensor:
-    """Reference oracle for the einsum form (mirrors the wrapper above)."""
-    info = _parse_bmnk(equation)
-    A_bmk = A.permute(*info["a_perm"]).contiguous()
-    W_bnk = W.permute(*info["w_perm"]).contiguous()
-    A_scale_bmk = A_scale.permute(*info["a_perm"]).contiguous()
-    W_scale_bnk = W_scale.permute(*info["w_perm"]).contiguous()
-    out_bmn = _torch_batched_gemm_fp8_blockscale(A_bmk, W_bnk, A_scale_bmk, W_scale_bnk)
-    inv_o = [info["o_perm"].index(i) for i in range(3)]
-    return out_bmn.permute(*inv_o).contiguous()
