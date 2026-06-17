@@ -124,7 +124,8 @@ torch::Tensor
     torch::Tensor& WQ,
     torch::Tensor& x_scale,
     torch::Tensor& w_scale,
-    torch::Tensor& Y)
+    torch::Tensor& Y,
+    int KBatch)
 {{
     const int M = XQ.size(1);
     const int N = WQ.size(1);
@@ -163,7 +164,7 @@ torch::Tensor
             ck::tensor_operation::device::GemmSpecialization::{{GemmSpec}}>;
 
         return batched_gemm_fp8_blockscale_impl<DDataType, EDataType, GemmInstance>(
-            XQ, WQ, x_scale, w_scale, Y);
+            XQ, WQ, x_scale, w_scale, Y, KBatch);
 """
 
         IMPL_str = (
@@ -191,7 +192,8 @@ template torch::Tensor
     torch::Tensor& WQ,
     torch::Tensor& x_scale,
     torch::Tensor& w_scale,
-    torch::Tensor& Y);
+    torch::Tensor& Y,
+    int KBatch);
 """
         Path(os.path.join(self.instances_path, f"{k.name}_dFP32_eBF16.cpp")).write_text(
             INSTANCE_template.format(name=k.name, dtypes="FP32, BF16")
@@ -253,7 +255,8 @@ torch::Tensor
     torch::Tensor& WQ,
     torch::Tensor& x_scale,
     torch::Tensor& w_scale,
-    torch::Tensor& Y);
+    torch::Tensor& Y,
+    int KBatch = 1);
 """
         MANIFEST_end = """
 

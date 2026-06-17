@@ -99,17 +99,36 @@ def ck_batched_gemm_fp8_blockscale(
 ) -> torch.Tensor:
     """Public CK entry point. Same contract as ``aiter.batched_gemm_fp8_blockscale``.
 
-    Accepts both fp32 and uint8 (UE8M0) scales. uint8 scales are converted
-    to fp32 in the loader (cached, so the conversion is one-time per tensor).
+    Scale dtype:
+      * Accepts either fp32 *or* uint8 (UE8M0) scales -- but ``A_scale`` and
+        ``W_scale`` MUST share the same dtype. Mixing fp32 with u8 is an
+        error (the underlying CK template treats both scale tensors via the
+        same template parameter, and mixed-dtype is not legal at the model
+        level either: production either pre-converts both at load time or
+        keeps both in fp32).
+      * uint8 scales are converted to fp32 on the GPU before the CK call
+        (CK's template requires fp32). The W_scale conversion is cached
+        via a weak-ref keyed on ``id(W_scale)`` so weights pay the
+        ~10-50us cast exactly once per tensor lifetime.
     """
+    if A_scale.dtype != W_scale.dtype:
+        raise TypeError(
+            f"ck_batched_gemm_fp8_blockscale: A_scale.dtype ({A_scale.dtype}) "
+            f"and W_scale.dtype ({W_scale.dtype}) must match -- pass both as "
+            f"torch.float32 or both as torch.uint8 (UE8M0)."
+        )
+    if A_scale.dtype not in (torch.float32, torch.uint8):
+        raise TypeError(
+            f"ck_batched_gemm_fp8_blockscale: scale dtype must be torch.float32 "
+            f"or torch.uint8; got {A_scale.dtype}."
+        )
     if out is None:
         B, M, _ = A.shape
         N = W.shape[1]
         out = torch.empty((B, M, N), dtype=torch.bfloat16, device=A.device)
-    # CK kernel requires fp32 scales. Convert if needed (cached).
+    # CK kernel requires fp32 scales. Convert if needed (W_scale cached).
     if A_scale.dtype == torch.uint8:
         A_scale = _ue8m0_to_fp32(A_scale)
-    if W_scale.dtype == torch.uint8:
         W_scale = _ue8m0_to_fp32(W_scale)
     _batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out)
     return out

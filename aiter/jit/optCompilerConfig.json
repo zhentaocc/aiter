@@ -1592,7 +1592,10 @@
         "extra_include": [
             "f'{AITER_CSRC_DIR}/ck_batched_gemm_fp8_blockscale/include'"
         ],
-        "blob_gen_cmd": "f'{AITER_CSRC_DIR}/ck_batched_gemm_fp8_blockscale/gen_instances.py --working_path {{}} --tune_file {AITER_CONFIGS.AITER_CONFIG_FP8_BLOCKSCALE_BATCHED_GEMM_FILE}'"
+        "blob_gen_cmd": "f'{AITER_CSRC_DIR}/ck_batched_gemm_fp8_blockscale/gen_instances.py --working_path {{}} --tune_file {AITER_CONFIGS.AITER_CONFIG_FP8_BLOCKSCALE_BATCHED_GEMM_FILE}'",
+        "flags_extra_hip": [
+            "\"-DCK_USE_OCP_FP8=1\""
+        ]
     },
     "module_batched_gemm_fp8_blockscale_tune": {
         "srcs": [
@@ -1602,6 +1605,9 @@
         "extra_include": [
             "f'{AITER_CSRC_DIR}/ck_batched_gemm_fp8_blockscale/include'"
         ],
-        "blob_gen_cmd": "f'{AITER_CSRC_DIR}/ck_batched_gemm_fp8_blockscale/gen_instances.py --working_path {{}} --tune'"
+        "blob_gen_cmd": "f'{AITER_CSRC_DIR}/ck_batched_gemm_fp8_blockscale/gen_instances.py --working_path {{}} --tune'",
+        "flags_extra_hip": [
+            "\"-DCK_USE_OCP_FP8=1\""
+        ]
     }
 }

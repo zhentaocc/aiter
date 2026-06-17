@@ -92,6 +92,22 @@ candidate_kernels_dict = {
     16:  KernelInstance(256,     1,   128,   128,    64,    64,   128,  16,  16,  32,   32,    1,    1,     [ 8, 32, 1],     [ 8, 32, 1],           1,           1,                   [1, 32, 1,  8],             [8],     "Intrawave",                  1,),
     17:  KernelInstance(256,     1,   128,   128,    64,   128,   256,  16,  16,  32,   32,    2,    1,     [16, 16, 1],     [16, 16, 1],           1,           1,                   [1, 32, 1,  8],             [8],     "Intrawave",                  1,),
     18:  KernelInstance(256,     1,   128,   128,    64,    64,   256,  16,  16,  32,   32,    1,    1,     [16, 16, 1],     [16, 16, 1],           1,           1,                   [1, 32, 1,  8],             [8],     "Intrawave",                  1,),
+
+    # NOTE: CK's BlockwiseGemmXdlops_pipeline_v1_ab_scale<Interwave, ...> is
+    # NOT specialised -- missing BlockHasHotloop, compile fails. So Interwave
+    # is unavailable for the ABScale GEMM path. Don't add Interwave variants.
+
+    # ----- MPerBlock=256 (big-M compute tile, BlockSize=256 -> 4 waves on M). -----
+    19:  KernelInstance(256,     1,   128,   128,   256,   128,   128,  16,  16,  32,   32,    4,    2,     [ 8, 32, 1],     [ 8, 32, 1],           1,           2,                   [1, 32, 1,  8],             [8],     "Intrawave",                  3,),
+    20:  KernelInstance(256,     1,   128,   128,   256,    64,   128,  16,  16,  32,   32,    4,    1,     [ 8, 32, 1],     [ 8, 32, 1],           1,           1,                   [1, 32, 1,  8],             [8],     "Intrawave",                  3,),
+    # (dropped: MPerBlock=256 with v3 + KPerBlock=256 -- violates v3 scaleblocksliceK==1)
+    # (dropped: MPerBlock=256, NPerBlock=256, v3 -- violates v3 scaleblocksliceN==1)
+
+    # ----- BlockSize=128 (2 waves / WG -> lower LDS pressure, more WG/CU). -----
+    21:  KernelInstance(128,     1,   128,   128,    64,   128,   128,  16,  16,  32,   32,    2,    2,     [ 8, 16, 1],     [ 8, 16, 1],           1,           1,                   [1, 16, 1,  8],             [8],     "Intrawave",                  3,),
+    22:  KernelInstance(128,     1,   128,   128,    64,    64,   128,  16,  16,  32,   32,    2,    1,     [ 8, 16, 1],     [ 8, 16, 1],           1,           1,                   [1, 16, 1,  8],             [8],     "Intrawave",                  3,),
+    23:  KernelInstance(128,     1,   128,   128,    32,   128,   128,  16,  16,  32,   32,    1,    2,     [ 8, 16, 1],     [ 8, 16, 1],           1,           1,                   [1, 16, 1,  8],             [8],     "Intrawave",                  1,),
+    24:  KernelInstance(128,     1,   128,   128,    32,    64,   128,  16,  16,  32,   32,    1,    1,     [ 8, 16, 1],     [ 8, 16, 1],           1,           1,                   [1, 16, 1,  8],             [8],     "Intrawave",                  1,),
 }
 
 # ``batched_gemm_fp8_blockscale.cu`` ``batched_blockscale_heuristic_dispatch`` tiles (kernel id 7 is

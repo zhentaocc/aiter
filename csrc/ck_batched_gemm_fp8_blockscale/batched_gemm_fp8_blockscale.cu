@@ -13,7 +13,7 @@
 #include "batched_gemm_fp8_blockscale_manifest.h"
 
 using BatchedBlockscaleKernel = std::function<torch::Tensor(
-    torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&)>;
+    torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&, int)>;
 
 // (B, M, N, K) -> kernel
 struct IntTupleHash4 {
@@ -103,10 +103,13 @@ torch::Tensor batched_gemm_fp8_blockscale(torch::Tensor& XQ,
     const int N = WQ.size(1);
     const int K = XQ.size(2);
 
+    // Prod path: KBatch=1. splitK > 1 is exposed via the tune entry only;
+    // when the dispatcher gets extended to consume the tuned-CSV splitK
+    // column, swap the literal `1` for that value.
     if (Y.dtype() == at::ScalarType::Half) {
-        batched_blockscale_dispatch<FP32, FP16>(B, M, N, K)(XQ, WQ, x_scale, w_scale, Y);
+        batched_blockscale_dispatch<FP32, FP16>(B, M, N, K)(XQ, WQ, x_scale, w_scale, Y, 1);
     } else if (Y.dtype() == at::ScalarType::BFloat16) {
-        batched_blockscale_dispatch<FP32, BF16>(B, M, N, K)(XQ, WQ, x_scale, w_scale, Y);
+        batched_blockscale_dispatch<FP32, BF16>(B, M, N, K)(XQ, WQ, x_scale, w_scale, Y, 1);
     } else {
         TORCH_CHECK(false, "FP8 block-wise: unsupported output dtype (use fp16 or bf16)");
     }
