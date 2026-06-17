@@ -16,13 +16,13 @@
 //   Y       [B, M, N] bf16 (or fp16)
 //
 // K and N must be multiples of 128.
-torch::Tensor batched_gemm_fp8_blockwise(torch::Tensor& XQ,
+torch::Tensor batched_gemm_fp8_blockscale(torch::Tensor& XQ,
                                          torch::Tensor& WQ,
                                          torch::Tensor& x_scale,
                                          torch::Tensor& w_scale,
                                          torch::Tensor& Y);
 
-torch::Tensor batched_gemm_fp8_blockwise_tune(torch::Tensor& XQ,
+torch::Tensor batched_gemm_fp8_blockscale_tune(torch::Tensor& XQ,
                                               torch::Tensor& WQ,
                                               torch::Tensor& x_scale,
                                               torch::Tensor& w_scale,

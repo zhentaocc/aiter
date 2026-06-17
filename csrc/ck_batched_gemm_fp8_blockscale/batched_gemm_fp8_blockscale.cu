@@ -8,11 +8,11 @@
 
 #include <torch/extension.h>
 
-#include "batched_gemm_fp8_blockwise_common.cuh"
-#include "batched_gemm_fp8_blockwise_lookup.h"
-#include "batched_gemm_fp8_blockwise_manifest.h"
+#include "batched_gemm_fp8_blockscale_common.cuh"
+#include "batched_gemm_fp8_blockscale_lookup.h"
+#include "batched_gemm_fp8_blockscale_manifest.h"
 
-using BatchedBlockwiseKernel = std::function<torch::Tensor(
+using BatchedBlockscaleKernel = std::function<torch::Tensor(
     torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&)>;
 
 // (B, M, N, K) -> kernel
@@ -26,8 +26,8 @@ struct IntTupleHash4 {
     }
 };
 
-using BatchedBlockwiseKernelMap =
-    std::unordered_map<std::tuple<int, int, int, int>, BatchedBlockwiseKernel, IntTupleHash4>;
+using BatchedBlockscaleKernelMap =
+    std::unordered_map<std::tuple<int, int, int, int>, BatchedBlockscaleKernel, IntTupleHash4>;
 
 static constexpr int nextPow2(unsigned int num) {
     if (num <= 1) return 1;
@@ -35,36 +35,36 @@ static constexpr int nextPow2(unsigned int num) {
 }
 
 template <typename DDataType, typename EDataType = DDataType>
-static BatchedBlockwiseKernel batched_blockwise_heuristic_dispatch(int B, int M, int N, int K) {
+static BatchedBlockscaleKernel batched_blockscale_heuristic_dispatch(int B, int M, int N, int K) {
     // Tile heuristic mirrors ck_batched_gemm_a8w8 + the wo_a access pattern.
     // The per-batch invocation cost is ~constant in B, so this is M/N/K-driven only.
     if (M <= 16) {
         // Decode regime (V4-Flash decode hot path: M=1..16).  Memory-friendly tile.
-        return a8w8_batched_blockwise_1x128x128_256x16x128x256_16x16_16x16_1x2_16x16x1_16x16x1_1x16x1x16_8_1x2_intrawave_v1<DDataType, EDataType>;
+        return a8w8_batched_blockscale_1x128x128_256x16x128x256_16x16_16x16_1x2_16x16x1_16x16x1_1x16x1x16_8_1x2_intrawave_v1<DDataType, EDataType>;
     }
     if (M <= 64) {
-        return a8w8_batched_blockwise_1x128x128_256x32x128x128_16x16_32x32_1x1_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v1<DDataType, EDataType>;
+        return a8w8_batched_blockscale_1x128x128_256x32x128x128_16x16_32x32_1x1_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v1<DDataType, EDataType>;
     }
     if (M <= 256) {
-        return a8w8_batched_blockwise_1x128x128_256x64x128x128_16x16_32x32_2x1_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v1<DDataType, EDataType>;
+        return a8w8_batched_blockscale_1x128x128_256x64x128x128_16x16_32x32_2x1_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v1<DDataType, EDataType>;
     }
     // Mid-prefill: compute-friendly tile.
     if (M <= 1024) {
-        return a8w8_batched_blockwise_1x128x128_256x128x128x128_16x16_32x32_2x2_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v3<DDataType, EDataType>;
+        return a8w8_batched_blockscale_1x128x128_256x128x128x128_16x16_32x32_2x2_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v3<DDataType, EDataType>;
     }
     // Large-M prefill: bigger MPerBlock to amortise the loop-over-B dispatch.
-    return a8w8_batched_blockwise_1x128x128_256x128x128x128_16x16_32x32_2x2_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v3<DDataType, EDataType>;
+    return a8w8_batched_blockscale_1x128x128_256x128x128x128_16x16_32x32_2x2_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v3<DDataType, EDataType>;
 }
 
 template <typename DDataType, typename EDataType = DDataType>
-static BatchedBlockwiseKernel batched_blockwise_dispatch(int B, int M, int N, int K) {
+static BatchedBlockscaleKernel batched_blockscale_dispatch(int B, int M, int N, int K) {
     static const auto lookup = [] {
         if constexpr (std::is_same_v<EDataType, FP16>) {
-            return BatchedBlockwiseKernelMap{GENERATE_LOOKUP_TABLE(DDataType, FP16)};
+            return BatchedBlockscaleKernelMap{GENERATE_LOOKUP_TABLE(DDataType, FP16)};
         } else if constexpr (std::is_same_v<EDataType, BF16>) {
-            return BatchedBlockwiseKernelMap{GENERATE_LOOKUP_TABLE(DDataType, BF16)};
+            return BatchedBlockscaleKernelMap{GENERATE_LOOKUP_TABLE(DDataType, BF16)};
         } else {
-            static_assert(false, "batched_blockwise_dispatch used with unsupported dtype!");
+            static_assert(false, "batched_blockscale_dispatch used with unsupported dtype!");
         }
     }();
 
@@ -80,10 +80,10 @@ static BatchedBlockwiseKernel batched_blockwise_dispatch(int B, int M, int N, in
     it = lookup.find({B, padded_m, N, K});
     if (it != lookup.end()) return it->second;
 
-    return batched_blockwise_heuristic_dispatch<DDataType, EDataType>(B, M, N, K);
+    return batched_blockscale_heuristic_dispatch<DDataType, EDataType>(B, M, N, K);
 }
 
-torch::Tensor batched_gemm_fp8_blockwise(torch::Tensor& XQ,
+torch::Tensor batched_gemm_fp8_blockscale(torch::Tensor& XQ,
                                          torch::Tensor& WQ,
                                          torch::Tensor& x_scale,
                                          torch::Tensor& w_scale,
@@ -104,9 +104,9 @@ torch::Tensor batched_gemm_fp8_blockwise(torch::Tensor& XQ,
     const int K = XQ.size(2);
 
     if (Y.dtype() == at::ScalarType::Half) {
-        batched_blockwise_dispatch<FP32, FP16>(B, M, N, K)(XQ, WQ, x_scale, w_scale, Y);
+        batched_blockscale_dispatch<FP32, FP16>(B, M, N, K)(XQ, WQ, x_scale, w_scale, Y);
     } else if (Y.dtype() == at::ScalarType::BFloat16) {
-        batched_blockwise_dispatch<FP32, BF16>(B, M, N, K)(XQ, WQ, x_scale, w_scale, Y);
+        batched_blockscale_dispatch<FP32, BF16>(B, M, N, K)(XQ, WQ, x_scale, w_scale, Y);
     } else {
         TORCH_CHECK(false, "FP8 block-wise: unsupported output dtype (use fp16 or bf16)");
     }

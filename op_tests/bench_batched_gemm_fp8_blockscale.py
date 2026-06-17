@@ -2,7 +2,7 @@
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Microbench: ``aiter.batched_gemm_fp8_blockwise`` vs torch dequant + bf16 bmm
+Microbench: ``aiter.batched_gemm_fp8_blockscale`` vs torch dequant + bf16 bmm
 oracle, on DeepSeek V4 ``wo_a``-realistic shapes.
 
 Shapes are derived from the V4-Flash / V4-Pro architecture comments in
@@ -21,9 +21,9 @@ For wo_a's einsum ``"bhr,hdr->bhd"``:
     N = R  (output low-rank)
 
 Run:
-    python aiter/op_tests/bench_batched_gemm_fp8_blockwise.py
-    AITER_BENCH_ITERS=100 python aiter/op_tests/bench_batched_gemm_fp8_blockwise.py
-    python aiter/op_tests/bench_batched_gemm_fp8_blockwise.py --shapes flash_decode
+    python aiter/op_tests/bench_batched_gemm_fp8_blockscale.py
+    AITER_BENCH_ITERS=100 python aiter/op_tests/bench_batched_gemm_fp8_blockscale.py
+    python aiter/op_tests/bench_batched_gemm_fp8_blockscale.py --shapes flash_decode
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from typing import Callable, List
 import torch
 
 import aiter
-from aiter.ops.batched_gemm_op_fp8_blockwise import _torch_batched_gemm_fp8_blockwise
+from aiter.ops.batched_gemm_op_fp8_blockscale import _torch_batched_gemm_fp8_blockscale
 
 
 def _bench(fn: Callable, *, iters: int, warmup: int = 10) -> float:
@@ -125,23 +125,23 @@ def _make(B, M, N, K, *, device="cuda", seed=0):
 
 
 def _bench_shapes(name: str, shapes: List[tuple], iters: int) -> None:
-    print(f"\n=== {name} (page-128 blockwise FP8 scales) ===")
+    print(f"\n=== {name} (page-128 blockscale FP8 scales) ===")
     rows = []
     for B, M, N, K in shapes:
         A, W, A_s, W_s = _make(B, M, N, K, seed=B * M + N + K)
         # Pre-allocate output to avoid allocator noise.
         out = torch.empty((B, M, N), dtype=torch.bfloat16, device=A.device)
         torch_us = _bench(
-            lambda: _torch_batched_gemm_fp8_blockwise(A, W, A_s, W_s),
+            lambda: _torch_batched_gemm_fp8_blockscale(A, W, A_s, W_s),
             iters=iters,
         )
         auto_us = _bench(
-            lambda: aiter.batched_gemm_fp8_blockwise(A, W, A_s, W_s, out=out, backend="auto"),
+            lambda: aiter.batched_gemm_fp8_blockscale(A, W, A_s, W_s, out=out, backend="auto"),
             iters=iters,
         )
         try:
             ck_us = _bench(
-                lambda: aiter.batched_gemm_fp8_blockwise(A, W, A_s, W_s, out=out, backend="ck"),
+                lambda: aiter.batched_gemm_fp8_blockscale(A, W, A_s, W_s, out=out, backend="ck"),
                 iters=iters,
             )
             ck_str = f"{ck_us:.1f}"

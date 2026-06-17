@@ -6,7 +6,7 @@ KernelInstance dataclass + candidate / default kernel dicts for the FP8
 block-wise *batched* GEMM (DeepSeek V4 wo_a path).
 
 Mirrors ``ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale_instance.py``; the
-only differences are the kernel-name prefix (``a8w8_batched_blockwise``
+only differences are the kernel-name prefix (``a8w8_batched_blockscale``
 instead of ``a8w8_blockscale``) and the lookup-key arity (B, M, N, K
 instead of M, N, K).
 
@@ -47,7 +47,7 @@ class KernelInstance:
     def name(self) -> str:
         return ("_").join(
             [
-                "a8w8_batched_blockwise",
+                "a8w8_batched_blockscale",
                 ("x").join(map(str, [self.ScaleBlockM, self.ScaleBlockN, self.ScaleBlockK])),
                 ("x").join(map(str, [self.BLOCK_SIZE, self.MPerBLOCK, self.NPerBLOCK, self.KPerBLOCK])),
                 ("x").join(map(str, [self.AK1, self.BK1])),
@@ -94,10 +94,10 @@ candidate_kernels_dict = {
     18:  KernelInstance(256,     1,   128,   128,    64,    64,   256,  16,  16,  32,   32,    1,    1,     [16, 16, 1],     [16, 16, 1],           1,           1,                   [1, 32, 1,  8],             [8],     "Intrawave",                  1,),
 }
 
-# ``batched_gemm_fp8_blockwise.cu`` ``batched_blockwise_heuristic_dispatch`` tiles (kernel id 7 is
+# ``batched_gemm_fp8_blockscale.cu`` ``batched_blockscale_heuristic_dispatch`` tiles (kernel id 7 is
 # the CSV/default entry ``(-1)``). JIT codegen must emit these symbols into the manifest or the
 # module fails to compile when the tune file lists only a single default kernel.
-FP8_BLOCKWISE_HEURISTIC_EXTRA_KERNEL_IDS = (10, 15, 0)
+FP8_BLOCKSCALE_HEURISTIC_EXTRA_KERNEL_IDS = (10, 15, 0)
 
 
 default_kernels_dict = {

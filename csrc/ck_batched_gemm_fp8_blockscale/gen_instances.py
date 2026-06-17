@@ -8,10 +8,10 @@ Mirrors ``ck_gemm_a8w8_blockscale/gen_instances.py``.  Differences:
 
   * Lookup keys are 4-tuples ``(B, M, N, K)`` instead of 3-tuples ``(M, N, K)``.
   * Per-instance ``__forceinline__`` wrapper calls
-    ``batched_gemm_fp8_blockwise_impl`` (host-side B-loop) instead of
+    ``batched_gemm_fp8_blockscale_impl`` (host-side B-loop) instead of
     ``gemm_a8w8_blockscale_impl``.
   * Manifest signature is the batched signature from
-    ``include/batched_gemm_fp8_blockwise.h``.
+    ``include/batched_gemm_fp8_blockscale.h``.
 """
 
 import argparse
@@ -22,9 +22,9 @@ from pathlib import Path
 import pandas as pd
 import torch
 
-from batched_gemm_fp8_blockwise_instance import (
+from batched_gemm_fp8_blockscale_instance import (
     KernelInstance,
-    FP8_BLOCKWISE_HEURISTIC_EXTRA_KERNEL_IDS,
+    FP8_BLOCKSCALE_HEURISTIC_EXTRA_KERNEL_IDS,
     candidate_kernels_dict,
     default_kernels_dict,
 )
@@ -40,7 +40,7 @@ def _unique_instances_by_name(kernels_dict: dict) -> list:
     return out
 
 
-class batched_gemm_fp8_blockwise_codegen:
+class batched_gemm_fp8_blockscale_codegen:
     def __init__(self, working_path: str, istune: bool = False, tune_file: str | None = None):
         self.working_path = working_path
         if not os.path.exists(working_path):
@@ -83,7 +83,7 @@ class batched_gemm_fp8_blockwise_codegen:
         INSTANCE_IMPL = f"""// SPDX-License-Identifier: MIT
 // Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
-#include "batched_gemm_fp8_blockwise_common.cuh"
+#include "batched_gemm_fp8_blockscale_common.cuh"
 
 enum class GemmSpecialization {{
     Default    = 0,
@@ -162,7 +162,7 @@ torch::Tensor
             ck::BlockGemmPipelineVersion::v{k.PIPELINE_VERSION},
             ck::tensor_operation::device::GemmSpecialization::{{GemmSpec}}>;
 
-        return batched_gemm_fp8_blockwise_impl<DDataType, EDataType, GemmInstance>(
+        return batched_gemm_fp8_blockscale_impl<DDataType, EDataType, GemmInstance>(
             XQ, WQ, x_scale, w_scale, Y);
 """
 
@@ -219,7 +219,7 @@ template torch::Tensor
 
 #endif // USE_ROCM
 """
-        with open(os.path.join(self.working_path, "batched_gemm_fp8_blockwise_lookup.h"), "w") as f:
+        with open(os.path.join(self.working_path, "batched_gemm_fp8_blockscale_lookup.h"), "w") as f:
             f.write(LOOKUP_head)
             for bmnk, k in kernels_dict.items():
                 if not self.istune and isinstance(bmnk, tuple) and bmnk[0] > 0:
@@ -259,7 +259,7 @@ torch::Tensor
 
 #endif // USE_ROCM
 """
-        with open(os.path.join(self.working_path, "batched_gemm_fp8_blockwise_manifest.h"), "w") as f:
+        with open(os.path.join(self.working_path, "batched_gemm_fp8_blockscale_manifest.h"), "w") as f:
             f.write(MANIFEST_head)
             for k in _unique_instances_by_name(kernels_dict):
                 f.write(MANIFEST_template.format(kernel_name=k.name))
@@ -281,9 +281,9 @@ torch::Tensor
         else:
             kernels_dict = self.get_tune_dict(self.tune_file)
             # Heuristic dispatcher references multiple CK tiles; merge them into the JIT blob when the
-            # tune CSV does not already pull them in (see FP8_BLOCKWISE_HEURISTIC_EXTRA_KERNEL_IDS).
+            # tune CSV does not already pull them in (see FP8_BLOCKSCALE_HEURISTIC_EXTRA_KERNEL_IDS).
             seen_names = {k.name for k in kernels_dict.values()}
-            for idx, kid in enumerate(FP8_BLOCKWISE_HEURISTIC_EXTRA_KERNEL_IDS):
+            for idx, kid in enumerate(FP8_BLOCKSCALE_HEURISTIC_EXTRA_KERNEL_IDS):
                 k = candidate_kernels_dict[kid]
                 if k.name not in seen_names:
                     kernels_dict[(0, -(idx + 1), 0, 0)] = k
@@ -299,9 +299,9 @@ if __name__ == "__main__":
     parser.add_argument("-w", "--working_path", default="./", required=False)
     parser.add_argument(
         "-f", "--tune_file",
-        default="aiter/configs/fp8_blockwise_tuned_batched_gemm.csv",
+        default="aiter/configs/fp8_blockscale_tuned_batched_gemm.csv",
         required=False,
     )
     parser.add_argument("--tune", action="store_true", required=False)
     args = parser.parse_args()
-    batched_gemm_fp8_blockwise_codegen(args.working_path, args.tune, args.tune_file).run()
+    batched_gemm_fp8_blockscale_codegen(args.working_path, args.tune, args.tune_file).run()

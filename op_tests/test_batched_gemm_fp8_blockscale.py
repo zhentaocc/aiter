@@ -2,10 +2,10 @@
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Correctness tests for ``aiter.batched_gemm_fp8_blockwise``.
+Correctness tests for ``aiter.batched_gemm_fp8_blockscale``.
 
 Reference oracle: torch dequant + ``torch.bmm`` (the
-``_torch_batched_gemm_fp8_blockwise`` function in the wrapper module).
+``_torch_batched_gemm_fp8_blockscale`` function in the wrapper module).
 That oracle is itself the verbatim semantics of DeepGEMM's
 ``fp8_einsum("bmk,bnk->bmn", ..., recipe=(1, 1, 128))``.
 
@@ -24,7 +24,7 @@ import pytest
 import torch
 
 import aiter
-from aiter.ops.batched_gemm_op_fp8_blockwise import _torch_batched_gemm_fp8_blockwise
+from aiter.ops.batched_gemm_op_fp8_blockscale import _torch_batched_gemm_fp8_blockscale
 
 
 def _make_fp8(shape, *, generator, device="cuda") -> torch.Tensor:
@@ -103,8 +103,8 @@ def test_dsv4_wo_a_shapes(B, M, N, K):
         pytest.skip("requires CUDA/HIP device")
 
     A, W, A_scale, W_scale = _make_inputs(B, M, N, K, seed=B * M + N + K)
-    ref = _torch_batched_gemm_fp8_blockwise(A, W, A_scale, W_scale)
-    out = aiter.batched_gemm_fp8_blockwise(A, W, A_scale, W_scale, backend="auto")
+    ref = _torch_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
+    out = aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, backend="auto")
 
     assert out.shape == (B, M, N) and out.dtype == torch.bfloat16
     # Larger tolerance for big-K shapes (more accumulation noise).
@@ -119,13 +119,13 @@ def test_dsv4_dispatch_consistency(B, M, N, K):
         pytest.skip("requires CUDA/HIP device")
 
     A, W, A_scale, W_scale = _make_inputs(B, M, N, K, seed=B * M + N + K)
-    auto_out = aiter.batched_gemm_fp8_blockwise(A, W, A_scale, W_scale, backend="auto")
+    auto_out = aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, backend="auto")
 
     # Probe what auto picked, then run that backend explicitly and compare.
     # CK-only branch: small-M / non-128-aligned shapes go to torch.
     expected_backend = "ck" if (M >= 128 and M % 128 == 0 and N % 128 == 0) else "torch"
     try:
-        explicit_out = aiter.batched_gemm_fp8_blockwise(
+        explicit_out = aiter.batched_gemm_fp8_blockscale(
             A, W, A_scale, W_scale, backend=expected_backend,
         )
     except (ImportError, RuntimeError, AssertionError) as e:
@@ -166,7 +166,7 @@ def test_dsv4_einsum_layouts(equation, A_shape, W_shape, O_shape):
         A_s = torch.rand(B, H, R // 128, generator=g, device="cuda") * 0.05 + 0.005
         W_s = torch.rand(H, D // 128, R // 128, generator=g, device="cuda") * 0.05 + 0.005
 
-    out = aiter.batched_gemm_fp8_blockwise_einsum(
+    out = aiter.batched_gemm_fp8_blockscale_einsum(
         equation, A, A_s, W, W_s, backend="auto",
     )
     assert out.shape == O_shape and out.dtype == torch.bfloat16
@@ -174,15 +174,15 @@ def test_dsv4_einsum_layouts(equation, A_shape, W_shape, O_shape):
 
 @pytest.mark.parametrize("B,M,N,K", SHAPES)
 @pytest.mark.parametrize("backend", ["auto"])
-def test_batched_gemm_fp8_blockwise_correctness(B, M, N, K, backend):
+def test_batched_gemm_fp8_blockscale_correctness(B, M, N, K, backend):
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA/HIP device")
 
     A, W, A_scale, W_scale = _make_inputs(B, M, N, K, seed=B * M + N + K)
 
-    ref = _torch_batched_gemm_fp8_blockwise(A, W, A_scale, W_scale)
+    ref = _torch_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
 
-    out = aiter.batched_gemm_fp8_blockwise(
+    out = aiter.batched_gemm_fp8_blockscale(
         A, W, A_scale, W_scale, backend=backend,
     )
 
@@ -210,11 +210,11 @@ def test_wo_a_einsum_layout():
     # As a caller would do for wo_a:
     A = o_fp8.transpose(0, 1).contiguous()    # [G, T, D]
     A_scale = o_s.transpose(0, 1).contiguous()  # [G, T, D//128]
-    out_btn = aiter.batched_gemm_fp8_blockwise(A, w_fp8, A_scale, w_s, backend="auto")
+    out_btn = aiter.batched_gemm_fp8_blockscale(A, w_fp8, A_scale, w_s, backend="auto")
     out = out_btn.transpose(0, 1).contiguous()  # [T, G, R]
 
     # Reference: same transform on the torch path.
-    ref_btn = _torch_batched_gemm_fp8_blockwise(A, w_fp8, A_scale, w_s)
+    ref_btn = _torch_batched_gemm_fp8_blockscale(A, w_fp8, A_scale, w_s)
     ref = ref_btn.transpose(0, 1).contiguous()
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
 
@@ -242,8 +242,8 @@ def test_einsum_form_matches_oracle(equation, A_shape, W_shape, O_shape, backend
     """einsum-form output must match the torch dequant+bmm oracle."""
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA/HIP device")
-    from aiter.ops.batched_gemm_op_fp8_blockwise import (
-        _torch_batched_gemm_fp8_blockwise_einsum,
+    from aiter.ops.batched_gemm_op_fp8_blockscale import (
+        _torch_batched_gemm_fp8_blockscale_einsum,
     )
 
     g = torch.Generator(device="cuda").manual_seed(hash(equation) & 0xFFFF)
@@ -259,12 +259,12 @@ def test_einsum_form_matches_oracle(equation, A_shape, W_shape, O_shape, backend
     A_s = torch.rand(*A_scale_shape, generator=g, device="cuda", dtype=torch.float32) * 0.05 + 0.005
     W_s = torch.rand(*W_scale_shape, generator=g, device="cuda", dtype=torch.float32) * 0.05 + 0.005
 
-    out_einsum = aiter.batched_gemm_fp8_blockwise_einsum(
+    out_einsum = aiter.batched_gemm_fp8_blockscale_einsum(
         equation, A, A_s, W, W_s, backend=backend,
     )
     assert out_einsum.shape == tuple(O_shape)
 
-    ref = _torch_batched_gemm_fp8_blockwise_einsum(equation, A, A_s, W, W_s)
+    ref = _torch_batched_gemm_fp8_blockscale_einsum(equation, A, A_s, W, W_s)
     torch.testing.assert_close(out_einsum, ref, atol=2e-2, rtol=2e-2)
 
 
@@ -295,12 +295,12 @@ def test_einsum_form_bit_exact_with_bmk_form():
     W_grd = (torch.randn(G, R, D, generator=g, device="cuda") * 0.5).clamp(-8, 8).to(torch.float8_e4m3fn)
     Ws_grd = torch.rand(G, R // 128, D // 128, generator=g, device="cuda") * 0.05 + 0.005
 
-    out_einsum = aiter.batched_gemm_fp8_blockwise_einsum(
+    out_einsum = aiter.batched_gemm_fp8_blockscale_einsum(
         "tgd,grd->tgr", A_tgd, As_tgd, W_grd, Ws_grd, backend="auto",
     )
     assert out_einsum.shape == (T, G, R)
 
-    out_bmk = aiter.batched_gemm_fp8_blockwise(
+    out_bmk = aiter.batched_gemm_fp8_blockscale(
         A_tgd.transpose(0, 1).contiguous(),
         W_grd,
         As_tgd.transpose(0, 1).contiguous(),
@@ -327,7 +327,7 @@ def test_einsum_form_no_data_movement():
 
     a_ptr = A_tgd.data_ptr()
     w_ptr = W_grd.data_ptr()
-    aiter.batched_gemm_fp8_blockwise_einsum("tgd,grd->tgr", A_tgd, As_tgd, W_grd, Ws_grd, backend="auto")
+    aiter.batched_gemm_fp8_blockscale_einsum("tgd,grd->tgr", A_tgd, As_tgd, W_grd, Ws_grd, backend="auto")
     # Originals untouched (data_ptr stable, no in-place dequant or copy).
     assert A_tgd.data_ptr() == a_ptr
     assert W_grd.data_ptr() == w_ptr
@@ -335,7 +335,7 @@ def test_einsum_form_no_data_movement():
 
 def test_einsum_parse_errors():
     """The parser should reject malformed or ambiguous equations."""
-    from aiter.ops.batched_gemm_op_fp8_blockwise import _parse_bmnk
+    from aiter.ops.batched_gemm_op_fp8_blockscale import _parse_bmnk
 
     # Wrong rank.
     with pytest.raises(ValueError, match="exactly 3 axes"):

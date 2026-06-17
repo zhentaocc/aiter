@@ -31,7 +31,7 @@ import torch
 from aiter import logger as _aiter_logger
 
 logger = _aiter_logger
-_log = logger.getChild("batched_gemm_fp8_blockwise")
+_log = logger.getChild("batched_gemm_fp8_blockscale")
 
 
 Backend = Literal["auto", "ck", "torch"]
@@ -75,7 +75,7 @@ def convert_scales_to_ue8m0(scales: torch.Tensor) -> torch.Tensor:
     Example (vllm/atom DSv4 wo_a load):
 
         # In _setup_fp8_wo_a_scales / post_load_weights:
-        from aiter.ops.batched_gemm_op_fp8_blockwise import convert_scales_to_ue8m0
+        from aiter.ops.batched_gemm_op_fp8_blockscale import convert_scales_to_ue8m0
         self.wo_a.weight_scale_inv = nn.Parameter(
             convert_scales_to_ue8m0(self.wo_a.weight_scale_inv),
             requires_grad=False,
@@ -104,7 +104,7 @@ def convert_scales_to_ue8m0(scales: torch.Tensor) -> torch.Tensor:
 # ----------------------------------------------------------------------------
 
 
-def _torch_batched_gemm_fp8_blockwise(
+def _torch_batched_gemm_fp8_blockscale(
     A: torch.Tensor,
     W: torch.Tensor,
     A_scale: torch.Tensor,
@@ -136,7 +136,7 @@ def _torch_batched_gemm_fp8_blockwise(
 # ----------------------------------------------------------------------------
 
 
-def batched_gemm_fp8_blockwise(
+def batched_gemm_fp8_blockscale(
     A: torch.Tensor,
     W: torch.Tensor,
     A_scale: torch.Tensor,
@@ -184,16 +184,16 @@ def batched_gemm_fp8_blockwise(
     if chosen == "ck":
         if not _CK_BROKEN:
             try:
-                from aiter.ops._ck_batched_gemm_fp8_blockwise_loader import ck_batched_gemm_fp8_blockwise
-                return ck_batched_gemm_fp8_blockwise(A, W, A_scale, W_scale, out=out)
+                from aiter.ops._ck_batched_gemm_fp8_blockscale_loader import ck_batched_gemm_fp8_blockscale
+                return ck_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out=out)
             except (ImportError, NotImplementedError, RuntimeError) as e:
                 _log.warning(
-                    "CK batched_gemm_fp8_blockwise unavailable (%s); "
+                    "CK batched_gemm_fp8_blockscale unavailable (%s); "
                     "falling back to torch reference (silent for subsequent calls).", e,
                 )
                 _CK_BROKEN = True
 
-    out_ref = _torch_batched_gemm_fp8_blockwise(A, W, A_scale, W_scale)
+    out_ref = _torch_batched_gemm_fp8_blockscale(A, W, A_scale, W_scale)
     if out is not None:
         out.copy_(out_ref)
         return out
@@ -277,7 +277,7 @@ def _ensure_k_innermost(t: torch.Tensor, k_axis: int, name: str) -> torch.Tensor
     return t.contiguous()
 
 
-def batched_gemm_fp8_blockwise_einsum(
+def batched_gemm_fp8_blockscale_einsum(
     equation: str,
     A: torch.Tensor,
     A_scale: torch.Tensor,
@@ -337,7 +337,7 @@ def batched_gemm_fp8_blockwise_einsum(
     out_bmn = out.permute(*o_perm)
 
     # --- Dispatch to the existing BMK kernel.  Strides flow through.
-    batched_gemm_fp8_blockwise(
+    batched_gemm_fp8_blockscale(
         A_bmk, W_bnk, A_scale_bmk, W_scale_bnk,
         out=out_bmn, backend=backend,
     )
@@ -345,7 +345,7 @@ def batched_gemm_fp8_blockwise_einsum(
     return out
 
 
-def _torch_batched_gemm_fp8_blockwise_einsum(
+def _torch_batched_gemm_fp8_blockscale_einsum(
     equation: str,
     A: torch.Tensor,
     A_scale: torch.Tensor,
@@ -358,6 +358,6 @@ def _torch_batched_gemm_fp8_blockwise_einsum(
     W_bnk = W.permute(*info["w_perm"]).contiguous()
     A_scale_bmk = A_scale.permute(*info["a_perm"]).contiguous()
     W_scale_bnk = W_scale.permute(*info["w_perm"]).contiguous()
-    out_bmn = _torch_batched_gemm_fp8_blockwise(A_bmk, W_bnk, A_scale_bmk, W_scale_bnk)
+    out_bmn = _torch_batched_gemm_fp8_blockscale(A_bmk, W_bnk, A_scale_bmk, W_scale_bnk)
     inv_o = [info["o_perm"].index(i) for i in range(3)]
     return out_bmn.permute(*inv_o).contiguous()

@@ -6,14 +6,14 @@ Lazy loader for the CK FP8 block-wise batched GEMM modules.
 
 Two modules are exposed:
 
-  * ``batched_gemm_fp8_blockwise(XQ, WQ, x_scale, w_scale, Out)`` -- the
-    production dispatcher used by ``aiter.batched_gemm_fp8_blockwise``
+  * ``batched_gemm_fp8_blockscale(XQ, WQ, x_scale, w_scale, Out)`` -- the
+    production dispatcher used by ``aiter.batched_gemm_fp8_blockscale``
     (backend="ck").  Picks the kernel from the lookup CSV / heuristic.
 
-  * ``batched_gemm_fp8_blockwise_tune(XQ, WQ, x_scale, w_scale, Out,
+  * ``batched_gemm_fp8_blockscale_tune(XQ, WQ, x_scale, w_scale, Out,
     kernelId, splitK)`` -- direct kernel selection by integer id, for
     the tune driver in
-    ``csrc/ck_batched_gemm_fp8_blockwise/batched_gemm_fp8_blockwise_tune.py``.
+    ``csrc/ck_batched_gemm_fp8_blockscale/batched_gemm_fp8_blockscale_tune.py``.
 """
 
 from __future__ import annotations
@@ -35,9 +35,9 @@ def _gen_fake_out(
     return Out
 
 
-@compile_ops("module_batched_gemm_fp8_blockwise", fc_name="batched_gemm_fp8_blockwise",
+@compile_ops("module_batched_gemm_fp8_blockscale", fc_name="batched_gemm_fp8_blockscale",
              gen_fake=_gen_fake_out)
-def _batched_gemm_fp8_blockwise(
+def _batched_gemm_fp8_blockscale(
     XQ: torch.Tensor,
     WQ: torch.Tensor,
     x_scale: torch.Tensor,
@@ -46,9 +46,9 @@ def _batched_gemm_fp8_blockwise(
 ) -> torch.Tensor: ...
 
 
-@compile_ops("module_batched_gemm_fp8_blockwise_tune", fc_name="batched_gemm_fp8_blockwise_tune",
+@compile_ops("module_batched_gemm_fp8_blockscale_tune", fc_name="batched_gemm_fp8_blockscale_tune",
              gen_fake=lambda XQ, WQ, x_scale, w_scale, Out, kernelId, splitK=0: Out)
-def batched_gemm_fp8_blockwise_tune(
+def batched_gemm_fp8_blockscale_tune(
     XQ: torch.Tensor,
     WQ: torch.Tensor,
     x_scale: torch.Tensor,
@@ -89,7 +89,7 @@ def _ue8m0_to_fp32(scales_u8: torch.Tensor) -> torch.Tensor:
     return fp32
 
 
-def ck_batched_gemm_fp8_blockwise(
+def ck_batched_gemm_fp8_blockscale(
     A: torch.Tensor,
     W: torch.Tensor,
     A_scale: torch.Tensor,
@@ -97,7 +97,7 @@ def ck_batched_gemm_fp8_blockwise(
     *,
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Public CK entry point. Same contract as ``aiter.batched_gemm_fp8_blockwise``.
+    """Public CK entry point. Same contract as ``aiter.batched_gemm_fp8_blockscale``.
 
     Accepts both fp32 and uint8 (UE8M0) scales. uint8 scales are converted
     to fp32 in the loader (cached, so the conversion is one-time per tensor).
@@ -111,5 +111,5 @@ def ck_batched_gemm_fp8_blockwise(
         A_scale = _ue8m0_to_fp32(A_scale)
     if W_scale.dtype == torch.uint8:
         W_scale = _ue8m0_to_fp32(W_scale)
-    _batched_gemm_fp8_blockwise(A, W, A_scale, W_scale, out)
+    _batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out)
     return out
