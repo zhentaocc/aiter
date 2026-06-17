@@ -36,23 +36,31 @@ static constexpr int nextPow2(unsigned int num) {
 
 template <typename DDataType, typename EDataType = DDataType>
 static BatchedBlockscaleKernel batched_blockscale_heuristic_dispatch(int B, int M, int N, int K) {
-    // Tile heuristic mirrors ck_batched_gemm_a8w8 + the wo_a access pattern.
-    // The per-batch invocation cost is ~constant in B, so this is M/N/K-driven only.
-    if (M <= 16) {
-        // Decode regime (V4-Flash decode hot path: M=1..16).  Memory-friendly tile.
-        return a8w8_batched_blockscale_1x128x128_256x16x128x256_16x16_16x16_1x2_16x16x1_16x16x1_1x16x1x16_8_1x2_intrawave_v1<DDataType, EDataType>;
-    }
-    if (M <= 64) {
-        return a8w8_batched_blockscale_1x128x128_256x32x128x128_16x16_32x32_1x1_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v1<DDataType, EDataType>;
-    }
+    // Fallback for shapes absent from the tuned lookup table (the primary path).
+    // The M bands below are taken from the autotune sweep on the DSv4 wo_a shapes
+    // (aiter/configs/a8w8_blockscale_tuned_batched_gemm.csv; N=1024, K=4096,
+    // B in {1,2,8,16}): MPerBlock grows with M as the regime shifts memory- to
+    // compute-bound. Per-batch dispatch cost is ~constant in B, so the rule is
+    // M-driven only. All tiles use KPerBlock=128 so the fallback stays valid for
+    // any K % 128 == 0 (not just the tuned K=4096).
     if (M <= 256) {
-        return a8w8_batched_blockscale_1x128x128_256x64x128x128_16x16_32x32_2x1_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v1<DDataType, EDataType>;
+        // Decode + small prefill: MPerBlock=16 was the measured winner for every
+        // tuned M <= 256 (kernel id 6 here; id 8 is the same tile with KPerBlock
+        // =256, used by tuning at K=4096 but not K-general).
+        return a8w8_batched_blockscale_1x128x128_256x16x64x128_8x16_16x16_1x1_16x16x1_8x32x1_1x16x1x16_4_1x1_intrawave_v1<DDataType, EDataType>;
     }
-    // Mid-prefill: compute-friendly tile.
     if (M <= 1024) {
-        return a8w8_batched_blockscale_1x128x128_256x128x128x128_16x16_32x32_2x2_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v3<DDataType, EDataType>;
+        // Mid prefill: MPerBlock=64 / NPerBlock=64, intrawave v3 (tuned best at
+        // M=512, 1024).  kernel id 3.
+        return a8w8_batched_blockscale_1x128x128_256x64x64x128_16x16_32x32_1x1_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v3<DDataType, EDataType>;
     }
-    // Large-M prefill: bigger MPerBlock to amortise the loop-over-B dispatch.
+    if (M <= 2048) {
+        // MPerBlock=64 / NPerBlock=128, intrawave v3 (tuned best at M=2048).
+        // kernel id 2.
+        return a8w8_batched_blockscale_1x128x128_256x64x128x128_16x16_32x32_1x2_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v3<DDataType, EDataType>;
+    }
+    // Large-M prefill: full 128x128 compute tile, intrawave v3 (tuned best at
+    // M=4096).  kernel id 0.
     return a8w8_batched_blockscale_1x128x128_256x128x128x128_16x16_32x32_2x2_8x32x1_8x32x1_1x32x1x8_8_1x1_intrawave_v3<DDataType, EDataType>;
 }
 

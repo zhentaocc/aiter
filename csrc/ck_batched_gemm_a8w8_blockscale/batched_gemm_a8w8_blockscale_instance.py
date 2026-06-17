@@ -129,10 +129,12 @@ candidate_kernels_dict = {
     24:  KernelInstance(128,     1,   128,   128,    32,    64,   128,  16,  16,  32,   32,    1,    1,     [ 8, 16, 1],     [ 8, 16, 1],           1,           1,                   [1, 16, 1,  8],             [8],     "Intrawave",                  1,),
 }
 
-# ``batched_gemm_a8w8_blockscale.cu`` ``batched_blockscale_heuristic_dispatch`` tiles (kernel id 7 is
-# the CSV/default entry ``(-1)``). JIT codegen must emit these symbols into the manifest or the
-# module fails to compile when the tune file lists only a single default kernel.
-A8W8_BLOCKSCALE_HEURISTIC_EXTRA_KERNEL_IDS = (10, 15, 0)
+# Kernel ids referenced by ``batched_blockscale_heuristic_dispatch`` in
+# ``batched_gemm_a8w8_blockscale.cu`` (the M-banded fallback): id 6 (M<=256),
+# id 3 (M<=1024), id 2 (M<=2048), id 0 (large M). JIT codegen must emit these
+# symbols into the manifest/blob, otherwise the module fails to compile when the
+# tune file does not already pull them in.
+A8W8_BLOCKSCALE_HEURISTIC_EXTRA_KERNEL_IDS = (6, 3, 2, 0)
 
 
 default_kernels_dict = {
