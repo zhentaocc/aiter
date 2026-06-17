@@ -22,10 +22,10 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import time
 from pathlib import Path
 
 import torch
-import triton
 
 import aiter
 # Torch oracle lives next to the correctness test (not in the production
@@ -48,7 +48,7 @@ DEVICE = "cuda"
 # -----------------------------------------------------------------------------
 
 DSV4_BATCHES = [1, 2, 8, 16]
-DSV4_MS = [16, 32, 48, 64, 96, 128, 256, 512, 1024, 2048, 4096]
+DSV4_MS = [1, 4, 8, 16, 32, 48, 64, 96, 128, 256, 512, 1024, 2048, 4096, 8192]
 DSV4_N = 1024
 DSV4_K = 4096
 
@@ -95,11 +95,26 @@ def bench_one(B, M, N, K, *, warmup, rep, accuracy):
         max_err = diff.max().item()
         rel_err = max_err / max(ref.float().abs().max().item(), 1e-6)
 
-    # CK kernel timing. do_bench returns milliseconds; convert to microseconds.
+    # CK kernel timing. Same method as the tune driver
+    # (batched_gemm_fp8_blockscale_tune.py): per-call wall clock with a
+    # cuda.synchronize() after each launch, then take percentiles of the
+    # samples. This matches the ``us`` column in the tuned CSV (includes the
+    # per-call launch/sync overhead), unlike triton.do_bench which amortises
+    # it across batched launches.
     fn = lambda: aiter.batched_gemm_fp8_blockscale(A, W, A_scale, W_scale, out=Y)
-    ms, p20_ms, p80_ms = triton.testing.do_bench(
-        fn, warmup=warmup, rep=rep, quantiles=[0.5, 0.2, 0.8])
-    us, p20, p80 = ms * 1e3, p20_ms * 1e3, p80_ms * 1e3
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    samples = []
+    for _ in range(rep):
+        t0 = time.perf_counter_ns()
+        fn()
+        torch.cuda.synchronize()
+        samples.append((time.perf_counter_ns() - t0) / 1e3)  # us
+    samples.sort()
+    us = samples[len(samples) // 2]                       # median (p50)
+    p20 = samples[max(0, int(len(samples) * 0.20) - 1)]
+    p80 = samples[min(len(samples) - 1, int(len(samples) * 0.80))]
 
     flops = 2.0 * B * M * N * K
     tflops = flops / (us * 1e-6) / 1e12
@@ -213,8 +228,10 @@ def parse_args():
                    help=f"Custom K sweep (default: [{DSV4_K}]).")
     p.add_argument("--no-accuracy", action="store_true",
                    help="Skip torch-oracle accuracy check (faster on big M).")
-    p.add_argument("--warmup", type=int, default=25)
-    p.add_argument("--rep", type=int, default=100)
+    # Defaults match the tune driver (warmup=5, iters=20) so bench latencies
+    # are directly comparable to the tuned-CSV ``us`` column.
+    p.add_argument("--warmup", type=int, default=5)
+    p.add_argument("--rep", type=int, default=20, help="timed iterations (per-call sync)")
     p.add_argument("-o", type=str, metavar="FILE",
                    help="Output CSV file path for results.")
     return p.parse_args()
